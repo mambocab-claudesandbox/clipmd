@@ -17,36 +17,57 @@ there's a daemon mode that backs both the menu bar and the CLI.
 
 Written in [Zig](https://ziglang.org) (0.16). The macOS GUI talks directly to
 AppKit/Carbon through the Objective-C runtime — no Objective-C, Swift, or
-third-party packages.
+third-party packages, and **no `.app` bundle**: the CLI hosts the menu bar
+itself when started with `-d`.
 
 ---
 
 ## What it does
 
 * **Menu-bar item** (NSStatusItem): click **Transform Clipboard**.
-* **Global hotkey**: <kbd>⌘</kbd><kbd>⇧</kbd><kbd>M</kbd>, registered via Carbon
-  `RegisterEventHotKey` (no Accessibility permission required).
+* **Global hotkey**: configurable (default <kbd>⌘</kbd><kbd>⇧</kbd><kbd>M</kbd>),
+  registered via Carbon `RegisterEventHotKey` (no Accessibility permission
+  required).
 * On trigger it reads the clipboard, rewrites matching URLs, and writes back
   **three** representations (plain Markdown, HTML, RTF) so every app pastes the
   richest form it understands.
 * **CLI / pipes**: every transformation is exposed for stdin → stdout use.
-* **Daemon mode**: a background process serves a Unix socket so the CLI can
+* **Daemon mode** (`clipmd -d`): a background process that, on macOS, owns the
+  menu bar + hotkey, and on every platform serves a Unix socket so the CLI can
   trigger a clipboard transform (`clipmd run`) or transform a pipe through the
-  daemon (`clipmd send`). On macOS the daemon also owns the menu bar + hotkey.
+  daemon (`clipmd send`).
 
-## Rules
+## Configuration
 
-Rules live in a line-oriented config file (default
-`~/.config/clipmd/rules.conf`, override with `-c` or `$CLIPMD_CONFIG`):
+Config lives in a line-oriented file (default `~/.config/clipmd/rules.conf`,
+override with `-c` or `$CLIPMD_CONFIG`). It holds **rules** and **settings**:
 
 ```
-# <url-pattern>  =>  <display-template>
+# Settings use `@name value`.
+@hotkey cmd+shift+m
+
+# Rules:  <url-pattern>  =>  <display-template>
 *.ticketsystem.com/{id}              => {id}
 github.com/{owner}/{repo}/pull/{n}   => {owner}/{repo}#{n}
 *.atlassian.net/browse/{key}         => {key}
 ```
 
-Pattern syntax (a small, predictable wildcard language — anchored, whole-URL):
+### Keybinding (`@hotkey`)
+
+The global hotkey is configurable. Combine modifiers and one key with `+`
+(case- and whitespace-insensitive):
+
+* modifiers: `cmd`/`command`/`super`, `shift`, `opt`/`option`/`alt`,
+  `ctrl`/`control`
+* key: a letter/digit/punctuation character, or a named key (`space`, `return`,
+  `tab`, `escape`, `delete`)
+
+Examples: `@hotkey cmd+shift+m`, `@hotkey ctrl+opt+t`, `@hotkey cmd+1`. An
+invalid spec is reported on startup and the default (`cmd+shift+m`) is used.
+
+### Rules
+
+Pattern syntax — a small, predictable wildcard language (anchored, whole-URL):
 
 | Token | Matches |
 | --- | --- |
@@ -76,8 +97,6 @@ trimmed, so `Fixed in https://github.com/ziglang/zig/pull/42.` works.
 
 Requires Zig **0.16.0**.
 
-### Portable core + CLI (any OS)
-
 ```sh
 zig build              # produces zig-out/bin/clipmd
 zig build test         # run the unit tests
@@ -86,26 +105,27 @@ zig build test         # run the unit tests
 On non-macOS systems the pipe and daemon transforms work; the OS-clipboard
 commands (`clip`, `run`) report that the system clipboard is macOS-only.
 
-### macOS app bundle
+### Running on macOS
 
-On a Mac with the Xcode command-line tools:
-
-```sh
-macos/bundle.sh -Doptimize=ReleaseFast
-open zig-out/clipmd.app          # menu-bar item appears
-```
-
-To use the CLI too, symlink the bundled binary onto your `PATH`:
+There is no app bundle. Build on a Mac (Xcode command-line tools provide the SDK
+Zig links against), put the binary on your `PATH`, and start the daemon:
 
 ```sh
-ln -s "$PWD/zig-out/clipmd.app/Contents/MacOS/clipmd" /usr/local/bin/clipmd
+zig build -Doptimize=ReleaseFast
+cp zig-out/bin/clipmd /usr/local/bin/clipmd
+clipmd -d &            # menu-bar item appears; global hotkey is active
 ```
+
+A plain (unbundled) Mach-O binary can host an `NSStatusItem` and a Carbon global
+hotkey, so `clipmd -d` is all you need. To start it at login, point a launchd
+agent at `clipmd -d` (`~/Library/LaunchAgents/…plist` with `ProgramArguments`
+`["/usr/local/bin/clipmd", "-d"]`).
 
 > This project is developed in a Linux sandbox without the macOS SDK, so it
 > cannot *link* the final Mac binary here. The macOS sources are continuously
 > compile-checked for the `aarch64-macos` target with `zig build check-macos`
 > (full semantic analysis + codegen, no link). Linking happens on a Mac via
-> `zig build` / `macos/bundle.sh`.
+> `zig build`.
 
 ---
 
@@ -113,8 +133,8 @@ ln -s "$PWD/zig-out/clipmd.app/Contents/MacOS/clipmd" /usr/local/bin/clipmd
 
 ```
 clipmd [transform] [-f md|html|rtf] [-c CONFIG]   transform stdin -> stdout (default)
+clipmd -d [-c CONFIG]                             run the menu-bar / socket daemon
 clipmd clip [-c CONFIG]                           transform the macOS clipboard in place
-clipmd daemon [-c CONFIG]                         run the menu-bar / socket daemon
 clipmd run                                        ask the daemon to transform the clipboard
 clipmd send [-f md|html|rtf]                      pipe stdin through the daemon
 clipmd config path|init|show [-c CONFIG]          manage configuration
@@ -143,7 +163,7 @@ clipmd clip          # one-shot: transform whatever's on the clipboard now
 ### Daemon + trigger
 
 ```sh
-clipmd daemon &      # menu bar + hotkey + socket (foreground service)
+clipmd -d &          # menu bar + hotkey + socket (foreground service)
 clipmd run           # same effect as clicking the menu item
 echo -n 'https://github.com/a/b/pull/3' | clipmd send -f html   # via the daemon
 ```
@@ -151,7 +171,7 @@ echo -n 'https://github.com/a/b/pull/3' | clipmd send -f html   # via the daemon
 ### Config
 
 ```sh
-clipmd config init   # write an example rules file to the default path
+clipmd config init   # write an example config to the default path
 clipmd config show   # list loaded rules
 clipmd config path   # print the resolved config path
 ```
@@ -160,7 +180,7 @@ clipmd config path   # print the resolved config path
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `CLIPMD_CONFIG` | rules file path | `~/.config/clipmd/rules.conf` |
+| `CLIPMD_CONFIG` | config file path | `~/.config/clipmd/rules.conf` |
 | `CLIPMD_SOCK` | daemon socket path | `$TMPDIR/clipmd.sock` |
 
 ---
@@ -172,21 +192,20 @@ src/
   main.zig            CLI: argument parsing and subcommand dispatch
   transform.zig       engine: scan text for URLs, apply rules, render md/html/rtf
   pattern.zig         wildcard pattern matcher with named captures
-  config.zig          rules-file parser
+  config.zig          config-file parser (rules + @settings)
+  keybind.zig         parse "cmd+shift+m" -> Carbon key code + modifier mask
   rtf.zig             RTF document + hyperlink-field generation
   ipc.zig             Unix-socket daemon server + client (libc sockets)
   clipboard.zig       platform clipboard abstraction
   macos/
     objc.zig          minimal Objective-C runtime bindings + msgSend
     pasteboard.zig    NSPasteboard read / multi-type write
-    menubar -> app.zig NSStatusItem menu, app lifecycle, event loop
-    hotkey.zig        Carbon global hotkey (⌘⇧M)
-    Info.plist        accessory (LSUIElement) bundle metadata
-    bundle.sh         package zig-out/clipmd.app
+    app.zig           NSStatusItem menu, app lifecycle, event loop
+    hotkey.zig        Carbon global hotkey (configurable)
 ```
 
-The portable core (`pattern`, `config`, `rtf`, `transform`, `ipc`) is unit
-tested and runs on any platform. The macOS layer is isolated behind
+The portable core (`pattern`, `config`, `keybind`, `rtf`, `transform`, `ipc`) is
+unit tested and runs on any platform. The macOS layer is isolated behind
 `clipboard.zig` and only compiled into the binary for macOS targets.
 
 ### Wire protocol
@@ -206,5 +225,3 @@ TRANSFORM:<fmt>\n<body...>  -> <transformed body>
   has none); the wildcard + capture syntax covers the URL-rewriting use case.
 * Astral-plane Unicode in display text is emitted as RTF surrogate pairs; very
   exotic clipboard content falls back gracefully.
-* The global hotkey (⌘⇧M) and menu title are currently fixed; both are small,
-  localized changes in `macos/hotkey.zig` / `macos/app.zig`.

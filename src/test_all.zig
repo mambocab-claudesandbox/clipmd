@@ -8,4 +8,5 @@ test {
     _ = @import("config.zig");
     _ = @import("transform.zig");
     _ = @import("ipc.zig");
+    _ = @import("keybind.zig");
 }

@@ -26,6 +26,9 @@ pub const Config = struct {
     /// Backing storage for rule patterns/templates and the raw file text.
     arena: std.heap.ArenaAllocator,
     rules: []Rule,
+    /// Optional global-hotkey spec (e.g. "cmd+shift+m") from `@hotkey`. Null
+    /// means use the built-in default. Aliases the arena-owned text.
+    hotkey: ?[]const u8 = null,
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
@@ -47,6 +50,10 @@ pub const example =
     \\# pattern itself contains "://".
     \\#
     \\# Templates substitute {name} with the matching capture.
+    \\#
+    \\# Settings use `@name value`. The global hotkey (macOS) is configurable;
+    \\# modifiers: cmd/command/super, shift, opt/option/alt, ctrl/control.
+    \\@hotkey cmd+shift+m
     \\
     \\# Ticket systems: show just the ticket id, keep the link.
     \\*.ticketsystem.com/{id}                 => {id}
@@ -71,11 +78,18 @@ pub fn parse(gpa: Allocator, text: []const u8) !Config {
     const owned = try a.dupe(u8, text);
 
     var rules: std.ArrayList(Rule) = .empty;
+    var hotkey: ?[]const u8 = null;
 
     var lines = mem.splitScalar(u8, owned, '\n');
     while (lines.next()) |raw_line| {
         const line = mem.trim(u8, raw_line, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
+
+        // Directive lines: `@name value` (e.g. `@hotkey cmd+shift+m`).
+        if (line[0] == '@') {
+            try parseDirective(line[1..], &hotkey);
+            continue;
+        }
 
         const arrow = mem.indexOf(u8, line, "=>") orelse return error.MissingArrow;
         const pat_src = mem.trim(u8, line[0..arrow], " \t");
@@ -89,7 +103,24 @@ pub fn parse(gpa: Allocator, text: []const u8) !Config {
     return .{
         .arena = arena,
         .rules = try rules.toOwnedSlice(a),
+        .hotkey = hotkey,
     };
+}
+
+/// Parse a directive body (text after the leading `@`). The name runs up to the
+/// first space, tab, or `=`; the value is the trimmed remainder (a leading `=`
+/// is allowed). Unknown directives are ignored.
+fn parseDirective(body: []const u8, hotkey: *?[]const u8) !void {
+    const s = mem.trim(u8, body, " \t");
+    var end: usize = 0;
+    while (end < s.len and s[end] != ' ' and s[end] != '\t' and s[end] != '=') : (end += 1) {}
+    const name = s[0..end];
+    const value = mem.trim(u8, s[end..], " \t=");
+
+    if (mem.eql(u8, name, "hotkey")) {
+        if (value.len == 0) return error.EmptyDirectiveValue;
+        hotkey.* = value;
+    }
 }
 
 /// Load rules from a file via the given Io. Returns `error.FileNotFound` when
@@ -142,4 +173,21 @@ test "example config parses" {
     var cfg = try parse(testing.allocator, example);
     defer cfg.deinit();
     try testing.expect(cfg.rules.len >= 4);
+}
+
+test "hotkey directive is parsed and rules still load" {
+    const text =
+        \\@hotkey ctrl+opt+t
+        \\*.ticketsystem.com/{id} => {id}
+    ;
+    var cfg = try parse(testing.allocator, text);
+    defer cfg.deinit();
+    try testing.expectEqual(@as(usize, 1), cfg.rules.len);
+    try testing.expectEqualStrings("ctrl+opt+t", cfg.hotkey.?);
+}
+
+test "hotkey directive accepts equals form" {
+    var cfg = try parse(testing.allocator, "@hotkey = cmd+1");
+    defer cfg.deinit();
+    try testing.expectEqualStrings("cmd+1", cfg.hotkey.?);
 }

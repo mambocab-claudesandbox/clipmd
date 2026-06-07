@@ -2,9 +2,10 @@
 //!
 //! `RegisterEventHotKey` provides a system-wide hotkey that, unlike an
 //! `NSEvent` global monitor, does not require Accessibility permissions. The
-//! default binding is ⌘⇧M ("Markdown").
+//! key combination is configurable (see `keybind.zig`).
 
 const std = @import("std");
+const keybind = @import("../keybind.zig");
 
 const OSStatus = i32;
 const EventHotKeyRef = ?*anyopaque;
@@ -47,15 +48,6 @@ extern fn RegisterEventHotKey(
 const kEventClassKeyboard: u32 = fourCC("keyb");
 const kEventHotKeyPressed: u32 = 6;
 
-// Carbon modifier masks.
-const cmdKey: u32 = 0x0100;
-const shiftKey: u32 = 0x0200;
-const optionKey: u32 = 0x0800;
-const controlKey: u32 = 0x1000;
-
-// Virtual key code for 'M'.
-const kVK_ANSI_M: u32 = 0x2E;
-
 fn fourCC(comptime s: *const [4]u8) u32 {
     return (@as(u32, s[0]) << 24) | (@as(u32, s[1]) << 16) | (@as(u32, s[2]) << 8) | @as(u32, s[3]);
 }
@@ -68,9 +60,9 @@ fn handler(_: EventHandlerCallRef, _: EventRef, _: ?*anyopaque) callconv(.c) OSS
     return 0; // noErr
 }
 
-/// Install the global hotkey handler and register ⌘⇧M. `callback` runs on the
-/// main thread each time the hotkey fires.
-pub fn install(callback: *const fn () void) !void {
+/// Install the global hotkey handler and register `combo`. `callback` runs on
+/// the main thread each time the hotkey fires.
+pub fn install(combo: keybind.Combo, callback: *const fn () void) !void {
     on_fire = callback;
 
     const spec = EventTypeSpec{
@@ -81,6 +73,6 @@ pub fn install(callback: *const fn () void) !void {
         return error.InstallHandlerFailed;
 
     const hk_id = EventHotKeyID{ .signature = fourCC("clpm"), .id = 1 };
-    if (RegisterEventHotKey(kVK_ANSI_M, cmdKey | shiftKey, hk_id, GetApplicationEventTarget(), 0, &hotkey_ref) != 0)
+    if (RegisterEventHotKey(combo.key_code, combo.modifiers, hk_id, GetApplicationEventTarget(), 0, &hotkey_ref) != 0)
         return error.RegisterHotKeyFailed;
 }

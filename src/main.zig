@@ -3,9 +3,9 @@
 //!
 //! Subcommands:
 //!   transform   read stdin, write transformed text to stdout  (default)
-//!   clip        transform the macOS clipboard in place (one-shot)
-//!   daemon      run the background service (menu bar + global hotkey on macOS,
+//!   -d/--daemon run the background service (menu bar + global hotkey on macOS,
 //!               plus a Unix socket so the CLI can drive it)
+//!   clip        transform the macOS clipboard in place (one-shot)
 //!   run         tell a running daemon to transform the clipboard now
 //!   send        pipe stdin through a running daemon, print the result
 //!   config      path | init | show
@@ -20,6 +20,7 @@ const transform = @import("transform.zig");
 const config = @import("config.zig");
 const ipc = @import("ipc.zig");
 const clipboard = @import("clipboard.zig");
+const keybind = @import("keybind.zig");
 
 const is_macos = builtin.os.tag == .macos;
 const app = if (is_macos) @import("macos/app.zig") else struct {};
@@ -31,14 +32,15 @@ const usage =
     \\
     \\Usage:
     \\  clipmd [transform] [-f md|html|rtf] [-c CONFIG]   transform stdin -> stdout
+    \\  clipmd -d [-c CONFIG]                             run the menu-bar / socket daemon
     \\  clipmd clip [-c CONFIG]                           transform the clipboard (macOS)
-    \\  clipmd daemon [-c CONFIG]                         run the menu-bar / socket daemon
     \\  clipmd run                                        ask the daemon to transform the clipboard
     \\  clipmd send [-f md|html|rtf]                      pipe stdin through the daemon
     \\  clipmd config path|init|show [-c CONFIG]          manage configuration
     \\  clipmd version | help
     \\
     \\Options:
+    \\  -d, --daemon   run as the menu-bar daemon (macOS) / socket service
     \\  -f, --format   output format: md (default), html, rtf
     \\  -c, --config   path to a rules file (default: $CLIPMD_CONFIG or
     \\                 ~/.config/clipmd/rules.conf)
@@ -127,6 +129,9 @@ fn parseArgs(args: []const [:0]const u8) !Options {
             i += 1;
             if (i >= args.len) return error.MissingValue;
             opts.config_path = args[i];
+        } else if (mem.eql(u8, a, "-d") or mem.eql(u8, a, "--daemon")) {
+            opts.command = "daemon";
+            have_command = true;
         } else if (!have_command) {
             opts.command = a;
             have_command = true;
@@ -188,13 +193,20 @@ fn cmdDaemon(gpa: Allocator, io: std.Io, init: std.process.Init, engine: *const 
 
     try printErr(io, "clipmd daemon listening on {s}\n", .{sock_path});
 
+    // Resolve the configurable global hotkey, falling back to the default.
+    const spec = engine.cfg.hotkey orelse keybind.default_spec;
+    const combo = keybind.parse(spec) catch |err| blk: {
+        try printErr(io, "invalid hotkey '{s}' ({t}); using default {s}\n", .{ spec, err, keybind.default_spec });
+        break :blk keybind.default;
+    };
+
     if (comptime is_macos) {
         // Serve socket requests on a background thread; run the Cocoa event
         // loop (menu bar + hotkey) on the main thread.
         const thread = try std.Thread.spawn(.{}, ipc.Server.run, .{&server});
         thread.detach();
-        try printErr(io, "menu-bar item active; global hotkey: Cmd+Shift+M\n", .{});
-        try app.run(gpa, engine);
+        try printErr(io, "menu-bar item active; global hotkey: {s}\n", .{spec});
+        try app.run(gpa, engine, combo);
     } else {
         try printErr(io, "(no menu bar on this platform; serving socket only)\n", .{});
         server.run();

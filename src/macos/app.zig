@@ -9,6 +9,7 @@
 const std = @import("std");
 const objc = @import("objc.zig");
 const hotkey = @import("hotkey.zig");
+const keybind = @import("../keybind.zig");
 const clipboard = @import("../clipboard.zig");
 const transform = @import("../transform.zig");
 
@@ -65,7 +66,7 @@ fn makeDelegate() id {
 }
 
 /// Run the menu-bar app. Blocks in the Cocoa event loop until the user quits.
-pub fn run(gpa: std.mem.Allocator, engine: *const transform.Engine) !void {
+pub fn run(gpa: std.mem.Allocator, engine: *const transform.Engine, combo: keybind.Combo) !void {
     g_gpa = gpa;
     g_engine = engine;
 
@@ -103,8 +104,8 @@ pub fn run(gpa: std.mem.Allocator, engine: *const transform.Engine) !void {
 
     _ = objc.msgSend(void, g_status_item, "setMenu:", .{menu});
 
-    // Global hotkey (⌘⇧M). Non-fatal if it cannot be registered.
-    hotkey.install(hotkeyFired) catch {};
+    // Global hotkey. Non-fatal if it cannot be registered.
+    hotkey.install(combo, hotkeyFired) catch {};
 
     objc.release(t_title);
     objc.release(empty_key);
