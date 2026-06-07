@@ -41,7 +41,7 @@ const usage =
     \\Options:
     \\  -f, --format   output format: md (default), html, rtf
     \\  -c, --config   path to a config file (default: $CLIPMD_CONFIG or
-    \\                 ~/.config/clipmd/rules.conf)
+    \\                 ~/.config/clipmd/config.zon)
     \\
     \\Rule file format (one rule per line):
     \\  <url-pattern>  =>  <display-template>
@@ -290,7 +290,11 @@ const ConfigPath = struct {
 /// is allowed to be absent (treated as an empty rule set) so the tool works
 /// out of the box.
 fn loadConfig(gpa: Allocator, io: std.Io, cp: ConfigPath) !config.Config {
-    return config.load(gpa, io, cp.path) catch |err| switch (err) {
+    // Detailed ZON parse errors (line:column) are written to stderr.
+    var ebuf: [2048]u8 = undefined;
+    var efw = std.Io.File.stderr().writer(io, &ebuf);
+    defer efw.interface.flush() catch {};
+    return config.load(gpa, io, cp.path, &efw.interface) catch |err| switch (err) {
         error.FileNotFound => if (cp.explicit) return err else config.empty(gpa),
         else => return err,
     };
@@ -302,7 +306,7 @@ fn resolveConfigPath(arena: Allocator, init: std.process.Init, flag: ?[]const u8
         if (p.len > 0) return .{ .path = p, .explicit = true };
     }
     const home = init.environ_map.get("HOME") orelse ".";
-    const path = try std.fmt.allocPrint(arena, "{s}/.config/clipmd/rules.conf", .{home});
+    const path = try std.fmt.allocPrint(arena, "{s}/.config/clipmd/config.zon", .{home});
     return .{ .path = path, .explicit = false };
 }
 

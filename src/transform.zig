@@ -220,8 +220,16 @@ fn writeHtmlAttr(w: *Writer, text: []const u8) !void {
 
 const testing = std.testing;
 
-fn transformAlloc(text: []const u8, fmt: Format, rules: []const u8) ![]u8 {
-    var cfg = try config.parse(testing.allocator, rules);
+/// Build a single-rule (or, with an empty `match`, no-rule) ZON config and run
+/// the engine over `text`.
+fn transformAlloc(text: []const u8, fmt: Format, match: []const u8, display: []const u8) ![]u8 {
+    var zon_buf: [512]u8 = undefined;
+    const zon = if (match.len == 0)
+        ".{}"
+    else
+        try std.fmt.bufPrint(&zon_buf, ".{{ .rules = .{{ .{{ .match = \"{s}\", .display = \"{s}\" }} }} }}", .{ match, display });
+
+    var cfg = try config.parse(testing.allocator, zon, null);
     defer cfg.deinit();
     const engine = Engine.init(&cfg);
 
@@ -235,14 +243,15 @@ test "markdown transform of matched url" {
     const out = try transformAlloc(
         "https://whatever.ticketsystem.com/ABC-123",
         .md,
-        "*.ticketsystem.com/{id} => {id}",
+        "*.ticketsystem.com/{id}",
+        "{id}",
     );
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("[ABC-123](https://whatever.ticketsystem.com/ABC-123)", out);
 }
 
 test "markdown leaves unmatched url untouched" {
-    const out = try transformAlloc("see https://example.com/x for info", .md, "*.ticketsystem.com/{id} => {id}");
+    const out = try transformAlloc("see https://example.com/x for info", .md, "*.ticketsystem.com/{id}", "{id}");
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("see https://example.com/x for info", out);
 }
@@ -251,7 +260,8 @@ test "url embedded in sentence with trailing period" {
     const out = try transformAlloc(
         "Fixed in https://github.com/ziglang/zig/pull/42.",
         .md,
-        "github.com/{owner}/{repo}/pull/{n} => {owner}/{repo}#{n}",
+        "github.com/{owner}/{repo}/pull/{n}",
+        "{owner}/{repo}#{n}",
     );
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("Fixed in [ziglang/zig#42](https://github.com/ziglang/zig/pull/42).", out);
@@ -261,7 +271,8 @@ test "html transform produces hyperlink" {
     const out = try transformAlloc(
         "https://whatever.ticketsystem.com/ABC-123",
         .html,
-        "*.ticketsystem.com/{id} => {id}",
+        "*.ticketsystem.com/{id}",
+        "{id}",
     );
     defer testing.allocator.free(out);
     try testing.expectEqualStrings(
@@ -271,7 +282,7 @@ test "html transform produces hyperlink" {
 }
 
 test "html linkifies unmatched url with url text" {
-    const out = try transformAlloc("https://example.com/x", .html, "");
+    const out = try transformAlloc("https://example.com/x", .html, "", "");
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("<a href=\"https://example.com/x\">https://example.com/x</a>", out);
 }
@@ -280,7 +291,8 @@ test "rtf transform wraps document and links" {
     const out = try transformAlloc(
         "https://whatever.ticketsystem.com/ABC-123",
         .rtf,
-        "*.ticketsystem.com/{id} => {id}",
+        "*.ticketsystem.com/{id}",
+        "{id}",
     );
     defer testing.allocator.free(out);
     try testing.expect(mem.startsWith(u8, out, rtf.header));
@@ -290,7 +302,7 @@ test "rtf transform wraps document and links" {
 }
 
 test "html escapes literal text" {
-    const out = try transformAlloc("a < b & c", .html, "");
+    const out = try transformAlloc("a < b & c", .html, "", "");
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("a &lt; b &amp; c", out);
 }
@@ -299,7 +311,8 @@ test "multiple urls in one block" {
     const out = try transformAlloc(
         "a https://x.ticketsystem.com/T1 b https://x.ticketsystem.com/T2",
         .md,
-        "*.ticketsystem.com/{id} => {id}",
+        "*.ticketsystem.com/{id}",
+        "{id}",
     );
     defer testing.allocator.free(out);
     try testing.expectEqualStrings(

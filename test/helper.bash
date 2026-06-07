@@ -22,12 +22,16 @@ require_macos() {
 # Create a temp dir with a known config, and point clipmd at it via env.
 setup_clipmd_env() {
   TMP="$(mktemp -d)"
-  export CLIPMD_CONFIG="$TMP/rules.conf"
+  export CLIPMD_CONFIG="$TMP/config.zon"
   export CLIPMD_SOCK="$TMP/clipmd.sock"
   cat > "$CLIPMD_CONFIG" <<'EOF'
-@hotkey cmd+shift+m
-*.ticketsystem.com/{id}            => {id}
-github.com/{owner}/{repo}/pull/{n} => {owner}/{repo}#{n}
+.{
+    .hotkey = "cmd+shift+m",
+    .rules = .{
+        .{ .match = "*.ticketsystem.com/{id}", .display = "{id}" },
+        .{ .match = "github.com/{owner}/{repo}/pull/{n}", .display = "{owner}/{repo}#{n}" },
+    },
+}
 EOF
 }
 

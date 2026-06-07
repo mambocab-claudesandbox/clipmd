@@ -39,37 +39,39 @@ itself when run as `clipmd daemon`.
 
 ## Configuration
 
-Config lives in a line-oriented file (default `~/.config/clipmd/rules.conf`,
-override with `-c` or `$CLIPMD_CONFIG`). Each non-blank line is one of three
-things:
+Config is a [ZON](https://ziglang.org/documentation/master/std/#std.zon) file
+(Zig Object Notation — Zig's own data-literal syntax), parsed with `std.zon`. The
+default path is `~/.config/clipmd/config.zon` (override with `-c` or
+`$CLIPMD_CONFIG`). Run `clipmd config init` to write a commented starter file.
 
-* a **comment** — starts with `#`
-* a **setting** — starts with `@`, written `@name value`
-* a **rule** — `<url-pattern>  =>  <display-template>`
-
-```
-# Settings use `@name value`.
-@hotkey cmd+shift+m
-
-# Rules:  <url-pattern>  =>  <display-template>
-*.ticketsystem.com/{id}              => {id}
-github.com/{owner}/{repo}/pull/{n}   => {owner}/{repo}#{n}
-*.atlassian.net/browse/{key}         => {key}
+```zig
+.{
+    .hotkey = "cmd+shift+m",
+    .rules = .{
+        .{ .match = "*.ticketsystem.com/{id}", .display = "{id}" },
+        .{ .match = "github.com/{owner}/{repo}/pull/{n}", .display = "{owner}/{repo}#{n}" },
+        .{ .match = "*.atlassian.net/browse/{key}", .display = "{key}" },
+    },
+}
 ```
 
-**Why the `@` sigil?** It's just a line-type marker. Rules are the common case,
-so they get the bare `pattern => template` form; the `@` cleanly separates the
-handful of settings from rules without a heavier `[section]` syntax, and avoids
-ambiguity with `key = value` (since `=` legitimately appears inside patterns and
-templates). `#` marks comments, `@` marks settings, everything else is a rule.
+Both fields are optional: omit `.rules` for none, omit `.hotkey` for the default.
+ZON supports `//` comments and multiline strings.
 
-**Invalid config is fatal.** clipmd fails hard on startup (non-zero exit) for a
-malformed rule, an unknown `@directive`, or an invalid `@hotkey` — rather than
-silently ignoring it. A *missing* file is only an error when you named it
-explicitly with `-c`/`$CLIPMD_CONFIG`; the default location may be absent (the
-pipe transforms then just pass unmatched URLs through).
+**Why ZON?** It's the one config language with a Zig-team-maintained parser in
+the standard library (the alternatives in `std` are JSON, which has no comments,
+and parsing Zig source itself). ZON is native, hand-editable, gives typed
+deserialization straight into a struct, and yields good `line:column` error
+messages for free.
 
-### Keybinding (`@hotkey`)
+**Invalid config is fatal.** clipmd fails hard on startup (non-zero exit) for
+malformed ZON, an unknown field, an invalid `hotkey`, or an empty `match` —
+rather than silently ignoring it. ZON errors include the location, e.g.
+`1:17: error: missing required field display`. A *missing* file is only an error
+when you named it explicitly with `-c`/`$CLIPMD_CONFIG`; the default location may
+be absent (pipe transforms then just pass unmatched URLs through).
+
+### Keybinding (`hotkey`)
 
 The global hotkey is configurable. Combine modifiers and one key with `+`
 (case- and whitespace-insensitive):
@@ -79,9 +81,9 @@ The global hotkey is configurable. Combine modifiers and one key with `+`
 * key: a letter/digit/punctuation character, or a named key (`space`, `return`,
   `tab`, `escape`, `delete`)
 
-Examples: `@hotkey cmd+shift+m`, `@hotkey ctrl+opt+t`, `@hotkey cmd+1`. An
-invalid spec is a hard startup error (see "Invalid config is fatal" above). The
-default when `@hotkey` is omitted is `cmd+shift+m`.
+Examples: `.hotkey = "cmd+shift+m"`, `"ctrl+opt+t"`, `"cmd+1"`. An invalid spec
+is a hard startup error (see "Invalid config is fatal" above). The default when
+`.hotkey` is omitted is `cmd+shift+m`.
 
 ### Rules
 
@@ -210,7 +212,7 @@ echo -n 'https://github.com/a/b/pull/3' | clipmd send -f html   # via the daemon
 ### Config
 
 ```sh
-clipmd config init   # write an example config to the default path
+clipmd config init   # write a commented ZON config to the default path
 clipmd config show   # list loaded rules
 clipmd config path   # print the resolved config path
 ```
@@ -219,7 +221,7 @@ clipmd config path   # print the resolved config path
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `CLIPMD_CONFIG` | config file path | `~/.config/clipmd/rules.conf` |
+| `CLIPMD_CONFIG` | config file path | `~/.config/clipmd/config.zon` |
 | `CLIPMD_SOCK` | daemon socket path | `$TMPDIR/clipmd.sock` |
 
 ---
@@ -231,7 +233,7 @@ src/
   main.zig            CLI: argument parsing and subcommand dispatch
   transform.zig       engine: scan text for URLs, apply rules, render md/html/rtf
   pattern.zig         wildcard pattern matcher with named captures
-  config.zig          config-file parser (rules + @settings)
+  config.zig          ZON config parser (std.zon) -> rules + settings
   keybind.zig         parse "cmd+shift+m" -> Carbon key code + modifier mask
   rtf.zig             RTF document + hyperlink-field generation
   ipc.zig             Unix-socket daemon server + client (libc sockets)

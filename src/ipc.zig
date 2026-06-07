@@ -220,7 +220,9 @@ const testing = std.testing;
 test "server round-trip: ping and transform" {
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
 
-    var cfg = try config.parse(testing.allocator, "*.ticketsystem.com/{id} => {id}");
+    var cfg = try config.parse(testing.allocator,
+        \\.{ .rules = .{ .{ .match = "*.ticketsystem.com/{id}", .display = "{id}" } } }
+    , null);
     defer cfg.deinit();
     const engine = transform.Engine.init(&cfg);
 

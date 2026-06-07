@@ -49,17 +49,24 @@ teardown() { teardown_clipmd_env; }
 }
 
 @test "config: malformed hotkey fails hard at startup" {
-  printf '@hotkey cmd+nope\n' > "$CLIPMD_CONFIG"
+  printf '.{ .hotkey = "cmd+nope" }\n' > "$CLIPMD_CONFIG"
   run bash -c "printf x | '$CLIPMD_BIN'"
   [ "$status" -eq 1 ]
   [[ "$output" == *InvalidHotkey* ]]
 }
 
-@test "config: unknown directive fails hard" {
-  printf '@hotky cmd+m\n' > "$CLIPMD_CONFIG"
+@test "config: invalid ZON fails hard" {
+  printf 'this is not zon\n' > "$CLIPMD_CONFIG"
   run bash -c "printf x | '$CLIPMD_BIN'"
   [ "$status" -eq 1 ]
-  [[ "$output" == *UnknownDirective* ]]
+  [[ "$output" == *ParseZon* ]]
+}
+
+@test "config: unknown field fails hard" {
+  printf '.{ .hotky = "cmd+m" }\n' > "$CLIPMD_CONFIG"
+  run bash -c "printf x | '$CLIPMD_BIN'"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *ParseZon* ]]
 }
 
 @test "config show lists rules and the hotkey" {

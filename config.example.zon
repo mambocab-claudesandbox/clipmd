@@ -1,0 +1,25 @@
+.{
+    // Global hotkey (macOS). Modifiers: cmd/command/super, shift,
+    // opt/option/alt, ctrl/control. Key: a character or a named key
+    // (space, return, tab, escape, delete).
+    .hotkey = "cmd+shift+m",
+
+    // Each rule maps a URL `match` pattern to a `display` template.
+    // Pattern syntax:
+    //   *          any run of characters except '/'
+    //   {name}     a captured run of [^/?#]+
+    //   {name...}  a captured run that may span '/'
+    // The scheme (https://) and a leading "www." are ignored unless the
+    // pattern itself contains "://". Templates substitute {name}.
+    .rules = .{
+        // Ticket systems: show just the ticket id, keep the link.
+        .{ .match = "*.ticketsystem.com/{id}", .display = "{id}" },
+
+        // GitHub pull requests and issues.
+        .{ .match = "github.com/{owner}/{repo}/pull/{n}", .display = "{owner}/{repo}#{n}" },
+        .{ .match = "github.com/{owner}/{repo}/issues/{n}", .display = "{owner}/{repo}#{n}" },
+
+        // Jira-style boards.
+        .{ .match = "*.atlassian.net/browse/{key}", .display = "{key}" },
+    },
+}

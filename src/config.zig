@@ -1,16 +1,19 @@
-//! Configuration: a list of URL transformation rules loaded from a file.
+//! Configuration: transformation rules and settings, in ZON
+//! ("Zig Object Notation"), parsed with `std.zon`.
 //!
-//! The file format is line-oriented and hand-editable:
+//! Example (`~/.config/clipmd/config.zon`):
 //!
-//!   # comments start with '#'
-//!   <pattern>  =>  <display template>
+//!   .{
+//!       .hotkey = "cmd+shift+m",
+//!       .rules = .{
+//!           .{ .match = "*.ticketsystem.com/{id}", .display = "{id}" },
+//!           .{ .match = "github.com/{owner}/{repo}/pull/{n}", .display = "{owner}/{repo}#{n}" },
+//!       },
+//!   }
 //!
-//! Each non-blank, non-comment line is one rule. `pattern` uses the syntax in
-//! `pattern.zig`; `template` is the display text, referencing `{name}` captures.
-//!
-//! Example:
-//!   *.ticketsystem.com/{id}              => {id}
-//!   github.com/{owner}/{repo}/pull/{n}   => {owner}/{repo}#{n}
+//! `match` uses the pattern syntax in `pattern.zig`; `display` is the template,
+//! referencing `{name}` captures. `hotkey` is a keybinding spec (see
+//! `keybind.zig`). A malformed config is a hard error (see `parse`).
 
 const std = @import("std");
 const mem = std.mem;
@@ -18,13 +21,24 @@ const Allocator = mem.Allocator;
 const pattern = @import("pattern.zig");
 const keybind = @import("keybind.zig");
 
+/// The on-disk schema, deserialized by `std.zon`.
+const Schema = struct {
+    hotkey: []const u8 = keybind.default_spec,
+    rules: []const RuleSpec = &.{},
+
+    const RuleSpec = struct {
+        match: []const u8,
+        display: []const u8,
+    };
+};
+
 pub const Rule = struct {
     pattern: pattern.Pattern,
     template: []const u8,
 };
 
 pub const Config = struct {
-    /// Backing storage for rule patterns/templates and the raw file text.
+    /// Backing storage for rule patterns/templates and copied strings.
     arena: std.heap.ArenaAllocator,
     rules: []Rule,
     /// Global-hotkey spec as written (e.g. "cmd+shift+m"), for display.
@@ -40,99 +54,88 @@ pub const Config = struct {
 
 /// Built-in example configuration, also written by `clipmd config init`.
 pub const example =
-    \\# clipmd transformation rules
-    \\#
-    \\# Format:  <url-pattern>  =>  <display-template>
-    \\#
-    \\# Pattern syntax:
-    \\#   *          any run of characters except '/'
-    \\#   {name}     a captured run of [^/?#]+
-    \\#   {name...}  a captured run that may span '/'
-    \\# The scheme (https://) and a leading "www." are ignored unless the
-    \\# pattern itself contains "://".
-    \\#
-    \\# Templates substitute {name} with the matching capture.
-    \\#
-    \\# Settings use `@name value`. The global hotkey (macOS) is configurable;
-    \\# modifiers: cmd/command/super, shift, opt/option/alt, ctrl/control.
-    \\@hotkey cmd+shift+m
+    \\.{
+    \\    // Global hotkey (macOS). Modifiers: cmd/command/super, shift,
+    \\    // opt/option/alt, ctrl/control. Key: a character or a named key
+    \\    // (space, return, tab, escape, delete).
+    \\    .hotkey = "cmd+shift+m",
     \\
-    \\# Ticket systems: show just the ticket id, keep the link.
-    \\*.ticketsystem.com/{id}                 => {id}
+    \\    // Each rule maps a URL `match` pattern to a `display` template.
+    \\    // Pattern syntax:
+    \\    //   *          any run of characters except '/'
+    \\    //   {name}     a captured run of [^/?#]+
+    \\    //   {name...}  a captured run that may span '/'
+    \\    // The scheme (https://) and a leading "www." are ignored unless the
+    \\    // pattern itself contains "://". Templates substitute {name}.
+    \\    .rules = .{
+    \\        // Ticket systems: show just the ticket id, keep the link.
+    \\        .{ .match = "*.ticketsystem.com/{id}", .display = "{id}" },
     \\
-    \\# GitHub pull requests and issues.
-    \\github.com/{owner}/{repo}/pull/{n}      => {owner}/{repo}#{n}
-    \\github.com/{owner}/{repo}/issues/{n}    => {owner}/{repo}#{n}
+    \\        // GitHub pull requests and issues.
+    \\        .{ .match = "github.com/{owner}/{repo}/pull/{n}", .display = "{owner}/{repo}#{n}" },
+    \\        .{ .match = "github.com/{owner}/{repo}/issues/{n}", .display = "{owner}/{repo}#{n}" },
     \\
-    \\# Jira-style boards.
-    \\*.atlassian.net/browse/{key}            => {key}
+    \\        // Jira-style boards.
+    \\        .{ .match = "*.atlassian.net/browse/{key}", .display = "{key}" },
+    \\    },
+    \\}
     \\
 ;
 
-/// Parse rules from in-memory `text`. The returned `Config` owns a copy of the
-/// text, so `text` need not outlive it.
-pub fn parse(gpa: Allocator, text: []const u8) !Config {
+/// Parse a ZON config from in-memory `text`. A blank document yields an empty
+/// configuration. Any malformed input — bad ZON, an invalid hotkey, or an empty
+/// pattern — is a hard error. When `err_writer` is provided, the detailed ZON
+/// syntax/type error (with line:column) is written to it on `error.ParseZon`.
+pub fn parse(gpa: Allocator, text: []const u8, err_writer: ?*std.Io.Writer) !Config {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
     const a = arena.allocator();
 
-    // Copy the text so patterns/templates can safely alias it.
-    const owned = try a.dupe(u8, text);
+    if (mem.trim(u8, text, " \t\r\n").len == 0) {
+        return .{ .arena = arena, .rules = &.{} };
+    }
 
-    var rules: std.ArrayList(Rule) = .empty;
-    var hotkey_spec: []const u8 = keybind.default_spec;
-    var hotkey: keybind.Combo = keybind.default;
+    // Parse into a scratch arena: `std.zon.parse.free` cannot be used safely
+    // here because it would try to free string fields left at their (comptime)
+    // default values. We copy what we keep into `arena` and drop the rest.
+    var scratch = std.heap.ArenaAllocator.init(gpa);
+    defer scratch.deinit();
+    const sa = scratch.allocator();
 
-    var lines = mem.splitScalar(u8, owned, '\n');
-    while (lines.next()) |raw_line| {
-        const line = mem.trim(u8, raw_line, " \t\r");
-        if (line.len == 0 or line[0] == '#') continue;
+    const source = try sa.dupeZ(u8, text);
+    var diag: std.zon.parse.Diagnostics = .{};
+    const data = std.zon.parse.fromSliceAlloc(Schema, sa, source, &diag, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.ParseZon => {
+            if (err_writer) |w| w.print("{f}", .{diag}) catch {};
+            return error.ParseZon;
+        },
+    };
 
-        // Directive lines: `@name value` (e.g. `@hotkey cmd+shift+m`).
-        if (line[0] == '@') {
-            try parseDirective(line[1..], &hotkey_spec, &hotkey);
-            continue;
-        }
+    const combo = keybind.parse(data.hotkey) catch return error.InvalidHotkey;
+    const hotkey_spec = try a.dupe(u8, data.hotkey);
 
-        const arrow = mem.indexOf(u8, line, "=>") orelse return error.MissingArrow;
-        const pat_src = mem.trim(u8, line[0..arrow], " \t");
-        const template = mem.trim(u8, line[arrow + 2 ..], " \t");
-        if (pat_src.len == 0) return error.EmptyPattern;
-
-        const pat = try pattern.Pattern.parse(a, pat_src);
-        try rules.append(a, .{ .pattern = pat, .template = template });
+    const rules = try a.alloc(Rule, data.rules.len);
+    for (data.rules, 0..) |spec, i| {
+        if (spec.match.len == 0) return error.EmptyPattern;
+        const match = try a.dupe(u8, spec.match);
+        rules[i] = .{
+            .pattern = try pattern.Pattern.parse(a, match),
+            .template = try a.dupe(u8, spec.display),
+        };
     }
 
     return .{
         .arena = arena,
-        .rules = try rules.toOwnedSlice(a),
+        .rules = rules,
         .hotkey_spec = hotkey_spec,
-        .hotkey = hotkey,
+        .hotkey = combo,
     };
 }
 
-/// Parse a directive body (text after the leading `@`). The name runs up to the
-/// first space, tab, or `=`; the value is the trimmed remainder (a leading `=`
-/// is allowed). Unknown directives and invalid values are hard errors.
-fn parseDirective(body: []const u8, hotkey_spec: *[]const u8, hotkey: *keybind.Combo) !void {
-    const s = mem.trim(u8, body, " \t");
-    var end: usize = 0;
-    while (end < s.len and s[end] != ' ' and s[end] != '\t' and s[end] != '=') : (end += 1) {}
-    const name = s[0..end];
-    const value = mem.trim(u8, s[end..], " \t=");
-
-    if (mem.eql(u8, name, "hotkey")) {
-        if (value.len == 0) return error.EmptyDirectiveValue;
-        hotkey.* = keybind.parse(value) catch return error.InvalidHotkey;
-        hotkey_spec.* = value;
-    } else {
-        return error.UnknownDirective;
-    }
-}
-
-/// Load rules from a file via the given Io. Returns `error.FileNotFound` when
+/// Load config from a file via the given Io. Returns `error.FileNotFound` when
 /// the path does not exist (callers may treat that as an empty rule set).
-pub fn load(gpa: Allocator, io: std.Io, path: []const u8) !Config {
+pub fn load(gpa: Allocator, io: std.Io, path: []const u8, err_writer: ?*std.Io.Writer) !Config {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
 
@@ -141,10 +144,10 @@ pub fn load(gpa: Allocator, io: std.Io, path: []const u8) !Config {
     const text = try reader.interface.allocRemaining(gpa, .unlimited);
     defer gpa.free(text);
 
-    return parse(gpa, text);
+    return parse(gpa, text, err_writer);
 }
 
-/// An empty configuration (no rules). Used when no config file is present.
+/// An empty configuration (no rules, default hotkey).
 pub fn empty(gpa: Allocator) Config {
     return .{
         .arena = std.heap.ArenaAllocator.init(gpa),
@@ -158,56 +161,58 @@ pub fn empty(gpa: Allocator) Config {
 
 const testing = std.testing;
 
-test "parse rules and skip comments/blanks" {
+test "parse rules from ZON" {
     const text =
-        \\# a comment
-        \\
-        \\*.ticketsystem.com/{id}  => {id}
-        \\  github.com/{o}/{r}/pull/{n} => {o}/{r}#{n}
+        \\.{
+        \\    .rules = .{
+        \\        .{ .match = "*.ticketsystem.com/{id}", .display = "{id}" },
+        \\        .{ .match = "github.com/{o}/{r}/pull/{n}", .display = "{o}/{r}#{n}" },
+        \\    },
+        \\}
     ;
-    var cfg = try parse(testing.allocator, text);
+    var cfg = try parse(testing.allocator, text, null);
     defer cfg.deinit();
     try testing.expectEqual(@as(usize, 2), cfg.rules.len);
-    try testing.expectEqualStrings("{id}", cfg.rules[0].template);
+    try testing.expectEqualStrings("*.ticketsystem.com/{id}", cfg.rules[0].pattern.source);
     try testing.expectEqualStrings("{o}/{r}#{n}", cfg.rules[1].template);
 }
 
-test "missing arrow is an error" {
-    try testing.expectError(error.MissingArrow, parse(testing.allocator, "just-a-pattern"));
+test "blank document is empty config with default hotkey" {
+    var cfg = try parse(testing.allocator, "   \n\t\n", null);
+    defer cfg.deinit();
+    try testing.expectEqual(@as(usize, 0), cfg.rules.len);
+    try testing.expectEqual(keybind.default, cfg.hotkey);
 }
 
 test "example config parses" {
-    var cfg = try parse(testing.allocator, example);
+    var cfg = try parse(testing.allocator, example, null);
     defer cfg.deinit();
     try testing.expect(cfg.rules.len >= 4);
 }
 
-test "hotkey directive is parsed and validated; rules still load" {
+test "hotkey is parsed and validated" {
     const text =
-        \\@hotkey ctrl+opt+t
-        \\*.ticketsystem.com/{id} => {id}
+        \\.{ .hotkey = "ctrl+opt+t", .rules = .{ .{ .match = "x.com/{id}", .display = "{id}" } } }
     ;
-    var cfg = try parse(testing.allocator, text);
+    var cfg = try parse(testing.allocator, text, null);
     defer cfg.deinit();
-    try testing.expectEqual(@as(usize, 1), cfg.rules.len);
     try testing.expectEqualStrings("ctrl+opt+t", cfg.hotkey_spec);
     try testing.expectEqual(try keybind.parse("ctrl+opt+t"), cfg.hotkey);
 }
 
-test "hotkey directive accepts equals form" {
-    var cfg = try parse(testing.allocator, "@hotkey = cmd+1");
-    defer cfg.deinit();
-    try testing.expectEqualStrings("cmd+1", cfg.hotkey_spec);
-}
-
-test "default hotkey when none configured" {
-    var cfg = try parse(testing.allocator, "");
-    defer cfg.deinit();
-    try testing.expectEqual(keybind.default, cfg.hotkey);
-}
-
 test "malformed config is a hard error" {
-    try testing.expectError(error.InvalidHotkey, parse(testing.allocator, "@hotkey cmd+nope"));
-    try testing.expectError(error.UnknownDirective, parse(testing.allocator, "@hotky cmd+m"));
-    try testing.expectError(error.EmptyDirectiveValue, parse(testing.allocator, "@hotkey"));
+    // Invalid hotkey.
+    try testing.expectError(error.InvalidHotkey, parse(testing.allocator,
+        \\.{ .hotkey = "cmd+nope" }
+    , null));
+    // Not valid ZON.
+    try testing.expectError(error.ParseZon, parse(testing.allocator, "this is not zon", null));
+    // Unknown field.
+    try testing.expectError(error.ParseZon, parse(testing.allocator,
+        \\.{ .hotky = "cmd+m" }
+    , null));
+    // Empty pattern.
+    try testing.expectError(error.EmptyPattern, parse(testing.allocator,
+        \\.{ .rules = .{ .{ .match = "", .display = "x" } } }
+    , null));
 }
