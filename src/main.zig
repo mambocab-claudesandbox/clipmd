@@ -3,7 +3,7 @@
 //!
 //! Subcommands:
 //!   transform   read stdin, write transformed text to stdout  (default)
-//!   -d/--daemon run the background service (menu bar + global hotkey on macOS,
+//!   daemon      run the background service (menu bar + global hotkey on macOS,
 //!               plus a Unix socket so the CLI can drive it)
 //!   clip        transform the macOS clipboard in place (one-shot)
 //!   run         tell a running daemon to transform the clipboard now
@@ -20,7 +20,6 @@ const transform = @import("transform.zig");
 const config = @import("config.zig");
 const ipc = @import("ipc.zig");
 const clipboard = @import("clipboard.zig");
-const keybind = @import("keybind.zig");
 
 const is_macos = builtin.os.tag == .macos;
 const app = if (is_macos) @import("macos/app.zig") else struct {};
@@ -32,7 +31,7 @@ const usage =
     \\
     \\Usage:
     \\  clipmd [transform] [-f md|html|rtf] [-c CONFIG]   transform stdin -> stdout
-    \\  clipmd -d [-c CONFIG]                             run the menu-bar / socket daemon
+    \\  clipmd daemon [-c CONFIG]                         run the menu-bar / socket daemon
     \\  clipmd clip [-c CONFIG]                           transform the clipboard (macOS)
     \\  clipmd run                                        ask the daemon to transform the clipboard
     \\  clipmd send [-f md|html|rtf]                      pipe stdin through the daemon
@@ -40,9 +39,8 @@ const usage =
     \\  clipmd version | help
     \\
     \\Options:
-    \\  -d, --daemon   run as the menu-bar daemon (macOS) / socket service
     \\  -f, --format   output format: md (default), html, rtf
-    \\  -c, --config   path to a rules file (default: $CLIPMD_CONFIG or
+    \\  -c, --config   path to a config file (default: $CLIPMD_CONFIG or
     \\                 ~/.config/clipmd/rules.conf)
     \\
     \\Rule file format (one rule per line):
@@ -92,7 +90,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     // Remaining commands need the rule engine.
     var cfg = loadConfig(gpa, io, cfg_path) catch |err| {
-        try printErr(io, "failed to load config '{s}': {t}\n", .{ cfg_path, err });
+        try printErr(io, "failed to load config '{s}': {t}\n", .{ cfg_path.path, err });
         return 1;
     };
     defer cfg.deinit();
@@ -129,9 +127,6 @@ fn parseArgs(args: []const [:0]const u8) !Options {
             i += 1;
             if (i >= args.len) return error.MissingValue;
             opts.config_path = args[i];
-        } else if (mem.eql(u8, a, "-d") or mem.eql(u8, a, "--daemon")) {
-            opts.command = "daemon";
-            have_command = true;
         } else if (!have_command) {
             opts.command = a;
             have_command = true;
@@ -193,20 +188,14 @@ fn cmdDaemon(gpa: Allocator, io: std.Io, init: std.process.Init, engine: *const 
 
     try printErr(io, "clipmd daemon listening on {s}\n", .{sock_path});
 
-    // Resolve the configurable global hotkey, falling back to the default.
-    const spec = engine.cfg.hotkey orelse keybind.default_spec;
-    const combo = keybind.parse(spec) catch |err| blk: {
-        try printErr(io, "invalid hotkey '{s}' ({t}); using default {s}\n", .{ spec, err, keybind.default_spec });
-        break :blk keybind.default;
-    };
-
     if (comptime is_macos) {
         // Serve socket requests on a background thread; run the Cocoa event
-        // loop (menu bar + hotkey) on the main thread.
+        // loop (menu bar + hotkey) on the main thread. The hotkey is already
+        // parsed and validated at config load.
         const thread = try std.Thread.spawn(.{}, ipc.Server.run, .{&server});
         thread.detach();
-        try printErr(io, "menu-bar item active; global hotkey: {s}\n", .{spec});
-        try app.run(gpa, engine, combo);
+        try printErr(io, "menu-bar item active; global hotkey: {s}\n", .{engine.cfg.hotkey_spec});
+        try app.run(gpa, engine, engine.cfg.hotkey);
     } else {
         try printErr(io, "(no menu bar on this platform; serving socket only)\n", .{});
         server.run();
@@ -243,40 +232,42 @@ fn cmdSend(gpa: Allocator, io: std.Io, init: std.process.Init, fmt: transform.Fo
     return 0;
 }
 
-fn cmdConfig(gpa: Allocator, io: std.Io, opts: *const Options, cfg_path: []const u8) !u8 {
+fn cmdConfig(gpa: Allocator, io: std.Io, opts: *const Options, cfg_path: ConfigPath) !u8 {
     const sub = opts.sub orelse "path";
+    const path = cfg_path.path;
 
     if (mem.eql(u8, sub, "path")) {
-        try printOut(io, "{s}\n", .{cfg_path});
+        try printOut(io, "{s}\n", .{path});
         return 0;
     } else if (mem.eql(u8, sub, "init")) {
-        if (mem.lastIndexOfScalar(u8, cfg_path, '/')) |slash| {
-            if (slash > 0) std.Io.Dir.cwd().createDirPath(io, cfg_path[0..slash]) catch |err| {
+        if (mem.lastIndexOfScalar(u8, path, '/')) |slash| {
+            if (slash > 0) std.Io.Dir.cwd().createDirPath(io, path[0..slash]) catch |err| {
                 try printErr(io, "could not create config directory: {t}\n", .{err});
                 return 1;
             };
         }
         // Don't clobber an existing config.
-        if (std.Io.Dir.cwd().access(io, cfg_path, .{})) |_| {
-            try printErr(io, "config already exists: {s}\n", .{cfg_path});
+        if (std.Io.Dir.cwd().access(io, path, .{})) |_| {
+            try printErr(io, "config already exists: {s}\n", .{path});
             return 1;
         } else |_| {}
-        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = config.example }) catch |err| {
+        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = config.example }) catch |err| {
             try printErr(io, "could not write config: {t}\n", .{err});
             return 1;
         };
-        try printErr(io, "wrote example config to {s}\n", .{cfg_path});
+        try printErr(io, "wrote example config to {s}\n", .{path});
         return 0;
     } else if (mem.eql(u8, sub, "show")) {
         var cfg = loadConfig(gpa, io, cfg_path) catch |err| {
-            try printErr(io, "failed to load config '{s}': {t}\n", .{ cfg_path, err });
+            try printErr(io, "failed to load config '{s}': {t}\n", .{ path, err });
             return 1;
         };
         defer cfg.deinit();
-        try printOut(io, "{d} rule(s) from {s}:\n", .{ cfg.rules.len, cfg_path });
+        try printOut(io, "{d} rule(s) from {s}:\n", .{ cfg.rules.len, path });
         for (cfg.rules) |rule| {
             try printOut(io, "  {s} => {s}\n", .{ rule.pattern.source, rule.template });
         }
+        try printOut(io, "hotkey: {s}\n", .{cfg.hotkey_spec});
         return 0;
     }
     try printErr(io, "config: unknown subcommand '{s}' (use path|init|show)\n", .{sub});
@@ -287,19 +278,32 @@ fn cmdConfig(gpa: Allocator, io: std.Io, opts: *const Options, cfg_path: []const
 // Config / path resolution
 // ---------------------------------------------------------------------------
 
-/// Load config, treating a missing file as an empty rule set.
-fn loadConfig(gpa: Allocator, io: std.Io, path: []const u8) !config.Config {
-    return config.load(gpa, io, path) catch |err| switch (err) {
-        error.FileNotFound => config.empty(gpa),
-        else => err,
+const ConfigPath = struct {
+    path: []const u8,
+    /// True when the path came from `-c` or `$CLIPMD_CONFIG` (the user named it
+    /// explicitly), false for the implicit default location.
+    explicit: bool,
+};
+
+/// Load config. A malformed config is always a hard error. A *missing* file is
+/// fatal only when the path was named explicitly; the implicit default location
+/// is allowed to be absent (treated as an empty rule set) so the tool works
+/// out of the box.
+fn loadConfig(gpa: Allocator, io: std.Io, cp: ConfigPath) !config.Config {
+    return config.load(gpa, io, cp.path) catch |err| switch (err) {
+        error.FileNotFound => if (cp.explicit) return err else config.empty(gpa),
+        else => return err,
     };
 }
 
-fn resolveConfigPath(arena: Allocator, init: std.process.Init, flag: ?[]const u8) ![]const u8 {
-    if (flag) |f| return f;
-    if (init.environ_map.get("CLIPMD_CONFIG")) |p| return p;
+fn resolveConfigPath(arena: Allocator, init: std.process.Init, flag: ?[]const u8) !ConfigPath {
+    if (flag) |f| return .{ .path = f, .explicit = true };
+    if (init.environ_map.get("CLIPMD_CONFIG")) |p| {
+        if (p.len > 0) return .{ .path = p, .explicit = true };
+    }
     const home = init.environ_map.get("HOME") orelse ".";
-    return std.fmt.allocPrint(arena, "{s}/.config/clipmd/rules.conf", .{home});
+    const path = try std.fmt.allocPrint(arena, "{s}/.config/clipmd/rules.conf", .{home});
+    return .{ .path = path, .explicit = false };
 }
 
 fn resolveSockPath(arena: Allocator, init: std.process.Init) ![]const u8 {

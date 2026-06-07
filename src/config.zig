@@ -16,6 +16,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const pattern = @import("pattern.zig");
+const keybind = @import("keybind.zig");
 
 pub const Rule = struct {
     pattern: pattern.Pattern,
@@ -26,9 +27,10 @@ pub const Config = struct {
     /// Backing storage for rule patterns/templates and the raw file text.
     arena: std.heap.ArenaAllocator,
     rules: []Rule,
-    /// Optional global-hotkey spec (e.g. "cmd+shift+m") from `@hotkey`. Null
-    /// means use the built-in default. Aliases the arena-owned text.
-    hotkey: ?[]const u8 = null,
+    /// Global-hotkey spec as written (e.g. "cmd+shift+m"), for display.
+    hotkey_spec: []const u8 = keybind.default_spec,
+    /// The parsed, validated global hotkey.
+    hotkey: keybind.Combo = keybind.default,
 
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
@@ -78,7 +80,8 @@ pub fn parse(gpa: Allocator, text: []const u8) !Config {
     const owned = try a.dupe(u8, text);
 
     var rules: std.ArrayList(Rule) = .empty;
-    var hotkey: ?[]const u8 = null;
+    var hotkey_spec: []const u8 = keybind.default_spec;
+    var hotkey: keybind.Combo = keybind.default;
 
     var lines = mem.splitScalar(u8, owned, '\n');
     while (lines.next()) |raw_line| {
@@ -87,7 +90,7 @@ pub fn parse(gpa: Allocator, text: []const u8) !Config {
 
         // Directive lines: `@name value` (e.g. `@hotkey cmd+shift+m`).
         if (line[0] == '@') {
-            try parseDirective(line[1..], &hotkey);
+            try parseDirective(line[1..], &hotkey_spec, &hotkey);
             continue;
         }
 
@@ -103,14 +106,15 @@ pub fn parse(gpa: Allocator, text: []const u8) !Config {
     return .{
         .arena = arena,
         .rules = try rules.toOwnedSlice(a),
+        .hotkey_spec = hotkey_spec,
         .hotkey = hotkey,
     };
 }
 
 /// Parse a directive body (text after the leading `@`). The name runs up to the
 /// first space, tab, or `=`; the value is the trimmed remainder (a leading `=`
-/// is allowed). Unknown directives are ignored.
-fn parseDirective(body: []const u8, hotkey: *?[]const u8) !void {
+/// is allowed). Unknown directives and invalid values are hard errors.
+fn parseDirective(body: []const u8, hotkey_spec: *[]const u8, hotkey: *keybind.Combo) !void {
     const s = mem.trim(u8, body, " \t");
     var end: usize = 0;
     while (end < s.len and s[end] != ' ' and s[end] != '\t' and s[end] != '=') : (end += 1) {}
@@ -119,7 +123,10 @@ fn parseDirective(body: []const u8, hotkey: *?[]const u8) !void {
 
     if (mem.eql(u8, name, "hotkey")) {
         if (value.len == 0) return error.EmptyDirectiveValue;
-        hotkey.* = value;
+        hotkey.* = keybind.parse(value) catch return error.InvalidHotkey;
+        hotkey_spec.* = value;
+    } else {
+        return error.UnknownDirective;
     }
 }
 
@@ -175,7 +182,7 @@ test "example config parses" {
     try testing.expect(cfg.rules.len >= 4);
 }
 
-test "hotkey directive is parsed and rules still load" {
+test "hotkey directive is parsed and validated; rules still load" {
     const text =
         \\@hotkey ctrl+opt+t
         \\*.ticketsystem.com/{id} => {id}
@@ -183,11 +190,24 @@ test "hotkey directive is parsed and rules still load" {
     var cfg = try parse(testing.allocator, text);
     defer cfg.deinit();
     try testing.expectEqual(@as(usize, 1), cfg.rules.len);
-    try testing.expectEqualStrings("ctrl+opt+t", cfg.hotkey.?);
+    try testing.expectEqualStrings("ctrl+opt+t", cfg.hotkey_spec);
+    try testing.expectEqual(try keybind.parse("ctrl+opt+t"), cfg.hotkey);
 }
 
 test "hotkey directive accepts equals form" {
     var cfg = try parse(testing.allocator, "@hotkey = cmd+1");
     defer cfg.deinit();
-    try testing.expectEqualStrings("cmd+1", cfg.hotkey.?);
+    try testing.expectEqualStrings("cmd+1", cfg.hotkey_spec);
+}
+
+test "default hotkey when none configured" {
+    var cfg = try parse(testing.allocator, "");
+    defer cfg.deinit();
+    try testing.expectEqual(keybind.default, cfg.hotkey);
+}
+
+test "malformed config is a hard error" {
+    try testing.expectError(error.InvalidHotkey, parse(testing.allocator, "@hotkey cmd+nope"));
+    try testing.expectError(error.UnknownDirective, parse(testing.allocator, "@hotky cmd+m"));
+    try testing.expectError(error.EmptyDirectiveValue, parse(testing.allocator, "@hotkey"));
 }

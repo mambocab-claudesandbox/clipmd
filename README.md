@@ -18,7 +18,7 @@ there's a daemon mode that backs both the menu bar and the CLI.
 Written in [Zig](https://ziglang.org) (0.16). The macOS GUI talks directly to
 AppKit/Carbon through the Objective-C runtime — no Objective-C, Swift, or
 third-party packages, and **no `.app` bundle**: the CLI hosts the menu bar
-itself when started with `-d`.
+itself when run as `clipmd daemon`.
 
 ---
 
@@ -32,7 +32,7 @@ itself when started with `-d`.
   **three** representations (plain Markdown, HTML, RTF) so every app pastes the
   richest form it understands.
 * **CLI / pipes**: every transformation is exposed for stdin → stdout use.
-* **Daemon mode** (`clipmd -d`): a background process that, on macOS, owns the
+* **Daemon mode** (`clipmd daemon`): a background process that, on macOS, owns the
   menu bar + hotkey, and on every platform serves a Unix socket so the CLI can
   trigger a clipboard transform (`clipmd run`) or transform a pipe through the
   daemon (`clipmd send`).
@@ -40,7 +40,12 @@ itself when started with `-d`.
 ## Configuration
 
 Config lives in a line-oriented file (default `~/.config/clipmd/rules.conf`,
-override with `-c` or `$CLIPMD_CONFIG`). It holds **rules** and **settings**:
+override with `-c` or `$CLIPMD_CONFIG`). Each non-blank line is one of three
+things:
+
+* a **comment** — starts with `#`
+* a **setting** — starts with `@`, written `@name value`
+* a **rule** — `<url-pattern>  =>  <display-template>`
 
 ```
 # Settings use `@name value`.
@@ -51,6 +56,18 @@ override with `-c` or `$CLIPMD_CONFIG`). It holds **rules** and **settings**:
 github.com/{owner}/{repo}/pull/{n}   => {owner}/{repo}#{n}
 *.atlassian.net/browse/{key}         => {key}
 ```
+
+**Why the `@` sigil?** It's just a line-type marker. Rules are the common case,
+so they get the bare `pattern => template` form; the `@` cleanly separates the
+handful of settings from rules without a heavier `[section]` syntax, and avoids
+ambiguity with `key = value` (since `=` legitimately appears inside patterns and
+templates). `#` marks comments, `@` marks settings, everything else is a rule.
+
+**Invalid config is fatal.** clipmd fails hard on startup (non-zero exit) for a
+malformed rule, an unknown `@directive`, or an invalid `@hotkey` — rather than
+silently ignoring it. A *missing* file is only an error when you named it
+explicitly with `-c`/`$CLIPMD_CONFIG`; the default location may be absent (the
+pipe transforms then just pass unmatched URLs through).
 
 ### Keybinding (`@hotkey`)
 
@@ -63,7 +80,8 @@ The global hotkey is configurable. Combine modifiers and one key with `+`
   `tab`, `escape`, `delete`)
 
 Examples: `@hotkey cmd+shift+m`, `@hotkey ctrl+opt+t`, `@hotkey cmd+1`. An
-invalid spec is reported on startup and the default (`cmd+shift+m`) is used.
+invalid spec is a hard startup error (see "Invalid config is fatal" above). The
+default when `@hotkey` is omitted is `cmd+shift+m`.
 
 ### Rules
 
@@ -105,6 +123,27 @@ zig build test         # run the unit tests
 On non-macOS systems the pipe and daemon transforms work; the OS-clipboard
 commands (`clip`, `run`) report that the system clipboard is macOS-only.
 
+### Testing
+
+Unit tests (the portable core) run anywhere:
+
+```sh
+zig build test
+```
+
+End-to-end CLI tests use [bats](https://github.com/bats-core/bats-core)
+(`brew install bats-core`):
+
+```sh
+bats test/                 # runs both suites
+```
+
+* `test/transform.bats` — pipes, daemon, and config behavior; portable.
+* `test/clipboard.bats` — exercises the real macOS pasteboard via `clipmd clip`
+  and the daemon's `run` trigger, using `pbcopy`/`pbpaste`/`osascript`. These
+  **auto-skip off macOS**, so the suite is green everywhere and meaningful on a
+  Mac.
+
 ### Running on macOS
 
 There is no app bundle. Build on a Mac (Xcode command-line tools provide the SDK
@@ -113,13 +152,13 @@ Zig links against), put the binary on your `PATH`, and start the daemon:
 ```sh
 zig build -Doptimize=ReleaseFast
 cp zig-out/bin/clipmd /usr/local/bin/clipmd
-clipmd -d &            # menu-bar item appears; global hotkey is active
+clipmd daemon &        # menu-bar item appears; global hotkey is active
 ```
 
 A plain (unbundled) Mach-O binary can host an `NSStatusItem` and a Carbon global
-hotkey, so `clipmd -d` is all you need. To start it at login, point a launchd
-agent at `clipmd -d` (`~/Library/LaunchAgents/…plist` with `ProgramArguments`
-`["/usr/local/bin/clipmd", "-d"]`).
+hotkey, so `clipmd daemon` is all you need. To start it at login, point a
+launchd agent at `clipmd daemon` (`~/Library/LaunchAgents/…plist` with
+`ProgramArguments` `["/usr/local/bin/clipmd", "daemon"]`).
 
 > This project is developed in a Linux sandbox without the macOS SDK, so it
 > cannot *link* the final Mac binary here. The macOS sources are continuously
@@ -133,7 +172,7 @@ agent at `clipmd -d` (`~/Library/LaunchAgents/…plist` with `ProgramArguments`
 
 ```
 clipmd [transform] [-f md|html|rtf] [-c CONFIG]   transform stdin -> stdout (default)
-clipmd -d [-c CONFIG]                             run the menu-bar / socket daemon
+clipmd daemon [-c CONFIG]                         run the menu-bar / socket daemon
 clipmd clip [-c CONFIG]                           transform the macOS clipboard in place
 clipmd run                                        ask the daemon to transform the clipboard
 clipmd send [-f md|html|rtf]                      pipe stdin through the daemon
@@ -163,7 +202,7 @@ clipmd clip          # one-shot: transform whatever's on the clipboard now
 ### Daemon + trigger
 
 ```sh
-clipmd -d &          # menu bar + hotkey + socket (foreground service)
+clipmd daemon &      # menu bar + hotkey + socket (foreground service)
 clipmd run           # same effect as clicking the menu item
 echo -n 'https://github.com/a/b/pull/3' | clipmd send -f html   # via the daemon
 ```
@@ -202,6 +241,10 @@ src/
     pasteboard.zig    NSPasteboard read / multi-type write
     app.zig           NSStatusItem menu, app lifecycle, event loop
     hotkey.zig        Carbon global hotkey (configurable)
+test/
+  transform.bats     portable end-to-end CLI tests (pipes, daemon, config)
+  clipboard.bats     macOS pasteboard tests (skip off macOS)
+  helper.bash        shared bats setup
 ```
 
 The portable core (`pattern`, `config`, `keybind`, `rtf`, `transform`, `ipc`) is
