@@ -9,14 +9,13 @@
 const std = @import("std");
 const objc = @import("objc.zig");
 const hotkey = @import("hotkey.zig");
-const keybind = @import("../keybind.zig");
 const clipboard = @import("../clipboard.zig");
-const transform = @import("../transform.zig");
+const service = @import("../service.zig");
 
 const id = objc.id;
 
 var g_gpa: std.mem.Allocator = undefined;
-var g_engine: *const transform.Engine = undefined;
+var g_service: *service.Service = undefined;
 var g_status_item: id = null;
 
 const NSApplicationActivationPolicyAccessory: c_long = 1;
@@ -25,7 +24,7 @@ const NSVariableStatusItemLength: f64 = -1.0;
 /// Shared action for the menu item and the global hotkey: transform the
 /// clipboard and reflect the outcome briefly in the status-item title.
 fn trigger() void {
-    const summary = clipboard.transformClipboard(g_gpa, g_engine.*) catch {
+    const summary = clipboard.transformClipboard(g_gpa, g_service) catch {
         setTitle("⚠");
         return;
     };
@@ -66,9 +65,10 @@ fn makeDelegate() id {
 }
 
 /// Run the menu-bar app. Blocks in the Cocoa event loop until the user quits.
-pub fn run(gpa: std.mem.Allocator, engine: *const transform.Engine, combo: keybind.Combo) !void {
+pub fn run(gpa: std.mem.Allocator, svc: *service.Service) !void {
     g_gpa = gpa;
-    g_engine = engine;
+    g_service = svc;
+    const combo = svc.hotkey();
 
     const NSApplication = objc.getClass("NSApplication");
     const app = objc.msgSend(id, NSApplication, "sharedApplication", .{});

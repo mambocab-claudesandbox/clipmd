@@ -48,6 +48,41 @@ teardown() { teardown_clipmd_env; }
   [ "$output" = '[ABC-1](https://x.ticketsystem.com/ABC-1)' ]
 }
 
+@test "daemon: hot-reloads config when the file changes" {
+  [[ "$(uname)" =~ ^(Linux|Darwin)$ ]] || skip "file watcher is Linux/macOS only"
+  start_daemon
+
+  # Baseline: the initial rule yields a bare id.
+  run bash -c "printf '%s' 'https://x.ticketsystem.com/ABC-1' | '$CLIPMD_BIN' send"
+  [ "$output" = '[ABC-1](https://x.ticketsystem.com/ABC-1)' ]
+
+  # Edit the config (new display template). The daemon should pick it up
+  # via the directory watcher, with no restart.
+  cat > "$CLIPMD_CONFIG" <<'EOF'
+.{ .rules = .{ .{ .match = "*.ticketsystem.com/{id}", .display = "T-{id}" } } }
+EOF
+
+  local ok=0 out
+  for _ in $(seq 1 50); do
+    out="$(printf '%s' 'https://x.ticketsystem.com/ABC-1' | "$CLIPMD_BIN" send)"
+    if [ "$out" = '[T-ABC-1](https://x.ticketsystem.com/ABC-1)' ]; then ok=1; break; fi
+    sleep 0.1
+  done
+  [ "$ok" -eq 1 ]
+}
+
+@test "daemon: a broken config edit is ignored (keeps serving)" {
+  [[ "$(uname)" =~ ^(Linux|Darwin)$ ]] || skip "file watcher is Linux/macOS only"
+  start_daemon
+
+  # Write invalid ZON; the daemon must keep using the previous good config.
+  printf 'this is not valid zon\n' > "$CLIPMD_CONFIG"
+  sleep 0.5
+  run bash -c "printf '%s' 'https://x.ticketsystem.com/ABC-1' | '$CLIPMD_BIN' send"
+  [ "$status" -eq 0 ]
+  [ "$output" = '[ABC-1](https://x.ticketsystem.com/ABC-1)' ]
+}
+
 @test "config: malformed hotkey fails hard at startup" {
   printf '.{ .hotkey = "cmd+nope" }\n' > "$CLIPMD_CONFIG"
   run bash -c "printf x | '$CLIPMD_BIN'"

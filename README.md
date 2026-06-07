@@ -71,6 +71,15 @@ rather than silently ignoring it. ZON errors include the location, e.g.
 when you named it explicitly with `-c`/`$CLIPMD_CONFIG`; the default location may
 be absent (pipe transforms then just pass unmatched URLs through).
 
+**Hot reload.** The daemon watches the config file's *directory* and reloads on
+change — no restart, no signals. (It watches the directory, not the file,
+because editors save atomically by writing a temp file and renaming over the
+original, which would otherwise leave a file watch stale.) A reload that fails
+to parse is logged and ignored; the daemon keeps serving the last good config.
+The mechanism is `inotify` on Linux and a libdispatch `VNODE` source on macOS.
+A changed `hotkey` takes effect on the next daemon start (the binding isn't
+re-registered live).
+
 ### Keybinding (`hotkey`)
 
 The global hotkey is configurable. Combine modifiers and one key with `+`
@@ -140,7 +149,8 @@ End-to-end CLI tests use [bats](https://github.com/bats-core/bats-core)
 bats test/                 # runs both suites
 ```
 
-* `test/transform.bats` — pipes, daemon, and config behavior; portable.
+* `test/transform.bats` — pipes, daemon, config behavior, and hot reload
+  (rewrites the config and asserts the daemon picks it up live); portable.
 * `test/clipboard.bats` — exercises the real macOS pasteboard via `clipmd clip`
   and the daemon's `run` trigger, using `pbcopy`/`pbpaste`/`osascript`. These
   **auto-skip off macOS**, so the suite is green everywhere and meaningful on a
@@ -236,6 +246,8 @@ src/
   config.zig          ZON config parser (std.zon) -> rules + settings
   keybind.zig         parse "cmd+shift+m" -> Carbon key code + modifier mask
   rtf.zig             RTF document + hyperlink-field generation
+  service.zig         thread-safe live config holder + hot reload
+  watcher.zig         config-dir file watcher (inotify / dispatch VNODE)
   ipc.zig             Unix-socket daemon server + client (libc sockets)
   clipboard.zig       platform clipboard abstraction
   macos/

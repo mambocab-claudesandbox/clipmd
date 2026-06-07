@@ -9,4 +9,5 @@ test {
     _ = @import("transform.zig");
     _ = @import("ipc.zig");
     _ = @import("keybind.zig");
+    _ = @import("service.zig");
 }

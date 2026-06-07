@@ -19,6 +19,7 @@ const Allocator = mem.Allocator;
 const posix = std.posix;
 const c = std.c;
 const transform = @import("transform.zig");
+const service = @import("service.zig");
 
 const SHUT_WR = 1;
 
@@ -30,7 +31,7 @@ pub const ClipFn = *const fn (ctx: *anyopaque) anyerror!ClipSummary;
 
 pub const Server = struct {
     gpa: Allocator,
-    engine: *const transform.Engine,
+    service: *service.Service,
     clip_fn: ?ClipFn,
     clip_ctx: *anyopaque,
     path: []const u8,
@@ -40,7 +41,7 @@ pub const Server = struct {
     /// removed first.
     pub fn init(
         gpa: Allocator,
-        engine: *const transform.Engine,
+        svc: *service.Service,
         path: []const u8,
         clip_fn: ?ClipFn,
         clip_ctx: *anyopaque,
@@ -60,7 +61,7 @@ pub const Server = struct {
 
         return .{
             .gpa = gpa,
-            .engine = engine,
+            .service = svc,
             .clip_fn = clip_fn,
             .clip_ctx = clip_ctx,
             .path = path,
@@ -128,7 +129,7 @@ pub const Server = struct {
         };
         var aw: std.Io.Writer.Allocating = .init(self.gpa);
         defer aw.deinit();
-        try self.engine.transform(self.gpa, &aw.writer, body, fmt);
+        try self.service.transformInto(self.gpa, &aw.writer, body, fmt);
         try writeAll(conn, aw.written());
     }
 };
@@ -220,15 +221,15 @@ const testing = std.testing;
 test "server round-trip: ping and transform" {
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
 
-    var cfg = try config.parse(testing.allocator,
+    const cfg = try config.parse(testing.allocator,
         \\.{ .rules = .{ .{ .match = "*.ticketsystem.com/{id}", .display = "{id}" } } }
     , null);
-    defer cfg.deinit();
-    const engine = transform.Engine.init(&cfg);
+    var svc = service.Service.init(testing.allocator, undefined, "unused", cfg);
+    defer svc.deinit();
 
     var dummy: u8 = 0;
     const sock_path = "/tmp/clipmd-test.sock";
-    var server = try Server.init(testing.allocator, &engine, sock_path, null, &dummy);
+    var server = try Server.init(testing.allocator, &svc, sock_path, null, &dummy);
     defer server.deinit();
 
     const T = struct {
