@@ -26,6 +26,8 @@ pub extern fn class_addMethod(cls: Class, name: SEL, imp: IMP, types: [*:0]const
 /// Pointer to the extra bytes requested via `objc_allocateClassPair`'s
 /// `extra_bytes`. Used to stash a context pointer on an instance.
 pub extern fn object_getIndexedIvars(obj: id) ?*anyopaque;
+pub extern fn objc_autoreleasePoolPush() ?*anyopaque;
+pub extern fn objc_autoreleasePoolPop(pool: ?*anyopaque) void;
 
 /// Look up a class by name.
 pub inline fn getClass(name: [*:0]const u8) Class {
@@ -67,28 +69,44 @@ pub fn msgSend(comptime Ret: type, target: anytype, sel_name: [*:0]const u8, arg
 
 pub const NSUTF8StringEncoding: usize = 4;
 
-/// Create an NSString (+1 retained) from a UTF-8 slice. Release when done.
+/// An autorelease pool scope. Idiomatic usage collapses many per-object
+/// releases into a single `defer`:
+///
+///     const pool = objc.AutoreleasePool.init();
+///     defer pool.deinit();
+///
+/// Objects from the autoreleased constructors below (and Cocoa's own
+/// convenience constructors) are released when the pool is drained.
+pub const AutoreleasePool = struct {
+    token: ?*anyopaque,
+
+    pub fn init() AutoreleasePool {
+        return .{ .token = objc_autoreleasePoolPush() };
+    }
+    pub fn deinit(self: AutoreleasePool) void {
+        objc_autoreleasePoolPop(self.token);
+    }
+};
+
+/// Create an autoreleased NSString from a UTF-8 slice. Valid until the
+/// enclosing `AutoreleasePool` is drained.
 pub fn nsString(bytes: []const u8) id {
-    const NSString = getClass("NSString");
-    const obj = msgSend(id, NSString, "alloc", .{});
-    return msgSend(id, obj, "initWithBytes:length:encoding:", .{
+    const obj = msgSend(id, getClass("NSString"), "alloc", .{});
+    const str = msgSend(id, obj, "initWithBytes:length:encoding:", .{
         @as([*]const u8, bytes.ptr),
         bytes.len,
         NSUTF8StringEncoding,
     });
+    return msgSend(id, str, "autorelease", .{});
 }
 
-/// Create an NSData (+1 retained) from a byte slice. Release when done.
+/// Create an autoreleased NSData from a byte slice. Valid until the enclosing
+/// `AutoreleasePool` is drained.
 pub fn nsData(bytes: []const u8) id {
-    const NSData = getClass("NSData");
-    const obj = msgSend(id, NSData, "alloc", .{});
-    return msgSend(id, obj, "initWithBytes:length:", .{
+    const obj = msgSend(id, getClass("NSData"), "alloc", .{});
+    const data = msgSend(id, obj, "initWithBytes:length:", .{
         @as([*]const u8, bytes.ptr),
         bytes.len,
     });
-}
-
-/// Release an Objective-C object.
-pub inline fn release(obj: id) void {
-    msgSend(void, obj, "release", .{});
+    return msgSend(id, data, "autorelease", .{});
 }

@@ -88,53 +88,48 @@ fn makeDelegate(ctx: *AppContext) id {
 /// Run the menu-bar app. Blocks in the Cocoa event loop until the user quits.
 pub fn run(gpa: std.mem.Allocator, io: std.Io, svc: *service.Service) !void {
     var ctx = AppContext{ .gpa = gpa, .io = io, .service = svc };
+    const app = objc.msgSend(id, objc.getClass("NSApplication"), "sharedApplication", .{});
 
-    const NSApplication = objc.getClass("NSApplication");
-    const app = objc.msgSend(id, NSApplication, "sharedApplication", .{});
-    _ = objc.msgSend(bool, app, "setActivationPolicy:", .{NSApplicationActivationPolicyAccessory});
+    {
+        // One pool drains every transient object created during setup. The
+        // status item (retained by the status bar), the menu, and the delegate
+        // (both owned via alloc/init) outlive it.
+        const pool = objc.AutoreleasePool.init();
+        defer pool.deinit();
 
-    // Status-bar item.
-    const NSStatusBar = objc.getClass("NSStatusBar");
-    const bar = objc.msgSend(id, NSStatusBar, "systemStatusBar", .{});
-    ctx.status_item = objc.msgSend(id, bar, "statusItemWithLength:", .{NSVariableStatusItemLength});
-    setTitle(&ctx, "⧉");
+        _ = objc.msgSend(bool, app, "setActivationPolicy:", .{NSApplicationActivationPolicyAccessory});
 
-    const delegate = makeDelegate(&ctx);
+        const bar = objc.msgSend(id, objc.getClass("NSStatusBar"), "systemStatusBar", .{});
+        ctx.status_item = objc.msgSend(id, bar, "statusItemWithLength:", .{NSVariableStatusItemLength});
+        setTitle(&ctx, "⧉");
 
-    // Menu.
-    const menu = objc.msgSend(id, objc.msgSend(id, objc.getClass("NSMenu"), "alloc", .{}), "init", .{});
+        const delegate = makeDelegate(&ctx);
 
-    const t_title = objc.nsString("Transform Clipboard");
-    const empty_key = objc.nsString("");
-    const item = objc.msgSend(id, menu, "addItemWithTitle:action:keyEquivalent:", .{
-        t_title, objc.sel("transformClipboard:"), empty_key,
-    });
-    objc.msgSend(void, item, "setTarget:", .{delegate});
+        const menu = objc.msgSend(id, objc.msgSend(id, objc.getClass("NSMenu"), "alloc", .{}), "init", .{});
 
-    objc.msgSend(void, menu, "addItem:", .{
-        objc.msgSend(id, objc.getClass("NSMenuItem"), "separatorItem", .{}),
-    });
+        const item = objc.msgSend(id, menu, "addItemWithTitle:action:keyEquivalent:", .{
+            objc.nsString("Transform Clipboard"), objc.sel("transformClipboard:"), objc.nsString(""),
+        });
+        objc.msgSend(void, item, "setTarget:", .{delegate});
 
-    const q_title = objc.nsString("Quit clipmd");
-    const q_key = objc.nsString("q");
-    _ = objc.msgSend(id, menu, "addItemWithTitle:action:keyEquivalent:", .{
-        q_title, objc.sel("terminate:"), q_key,
-    });
+        objc.msgSend(void, menu, "addItem:", .{
+            objc.msgSend(id, objc.getClass("NSMenuItem"), "separatorItem", .{}),
+        });
 
-    objc.msgSend(void, ctx.status_item, "setMenu:", .{menu});
+        _ = objc.msgSend(id, menu, "addItemWithTitle:action:keyEquivalent:", .{
+            objc.nsString("Quit clipmd"), objc.sel("terminate:"), objc.nsString("q"),
+        });
 
-    // Global hotkey (context via userData). Non-fatal if it can't register.
-    hotkey.install(svc.hotkey(io), hotkeyFired, &ctx) catch {};
+        objc.msgSend(void, ctx.status_item, "setMenu:", .{menu});
 
-    objc.release(t_title);
-    objc.release(empty_key);
-    objc.release(q_title);
-    objc.release(q_key);
+        // Global hotkey (context via userData). Non-fatal if it can't register.
+        hotkey.install(svc.hotkey(io), hotkeyFired, &ctx) catch {};
 
-    // Watch the config dir; reload + re-bind the hotkey on change. The handler
-    // runs on the main queue (during the event loop below), so re-binding is
-    // safe.
-    watcher.start(gpa, svc.path, &ctx, onConfigChanged);
+        // Watch the config dir; reload + re-bind the hotkey on change. The
+        // handler runs on the main queue (during the event loop below), so
+        // re-binding is safe.
+        watcher.start(gpa, svc.path, &ctx, onConfigChanged);
+    }
 
     objc.msgSend(void, app, "run", .{});
 }
