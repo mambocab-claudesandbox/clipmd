@@ -14,12 +14,12 @@ pub const supported = is_macos;
 
 /// Read the OS clipboard, transform it through `svc`, and write all
 /// representations back. Returns a count of matched/total URLs.
-pub fn transformClipboard(gpa: std.mem.Allocator, svc: *service.Service) !ipc.ClipSummary {
+pub fn transformClipboard(io: std.Io, gpa: std.mem.Allocator, svc: *service.Service) !ipc.ClipSummary {
     if (comptime is_macos) {
         const text = try pasteboard.readText(gpa);
         defer gpa.free(text);
 
-        const rendered = try svc.renderAll(gpa, text);
+        const rendered = try svc.renderAll(io, gpa, text);
         defer gpa.free(rendered.md);
         defer gpa.free(rendered.html);
         defer gpa.free(rendered.rtf);

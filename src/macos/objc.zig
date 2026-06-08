@@ -23,6 +23,9 @@ pub extern fn objc_msgSend() void;
 pub extern fn objc_allocateClassPair(superclass: Class, name: [*:0]const u8, extra_bytes: usize) Class;
 pub extern fn objc_registerClassPair(cls: Class) void;
 pub extern fn class_addMethod(cls: Class, name: SEL, imp: IMP, types: [*:0]const u8) bool;
+/// Pointer to the extra bytes requested via `objc_allocateClassPair`'s
+/// `extra_bytes`. Used to stash a context pointer on an instance.
+pub extern fn object_getIndexedIvars(obj: id) ?*anyopaque;
 
 /// Look up a class by name.
 pub inline fn getClass(name: [*:0]const u8) Class {
@@ -87,5 +90,5 @@ pub fn nsData(bytes: []const u8) id {
 
 /// Release an Objective-C object.
 pub inline fn release(obj: id) void {
-    _ = msgSend(void, obj, "release", .{});
+    msgSend(void, obj, "release", .{});
 }

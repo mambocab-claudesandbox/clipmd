@@ -31,6 +31,7 @@ pub const ClipFn = *const fn (ctx: *anyopaque) anyerror!ClipSummary;
 
 pub const Server = struct {
     gpa: Allocator,
+    io: std.Io,
     service: *service.Service,
     clip_fn: ?ClipFn,
     clip_ctx: *anyopaque,
@@ -41,6 +42,7 @@ pub const Server = struct {
     /// removed first.
     pub fn init(
         gpa: Allocator,
+        io: std.Io,
         svc: *service.Service,
         path: []const u8,
         clip_fn: ?ClipFn,
@@ -61,6 +63,7 @@ pub const Server = struct {
 
         return .{
             .gpa = gpa,
+            .io = io,
             .service = svc,
             .clip_fn = clip_fn,
             .clip_ctx = clip_ctx,
@@ -99,6 +102,9 @@ pub const Server = struct {
             try writeAll(conn, "PONG\n");
         } else if (mem.eql(u8, cmd, "CLIP")) {
             try self.handleClip(conn);
+        } else if (mem.eql(u8, cmd, "HOTKEY")) {
+            var buf: [64]u8 = undefined;
+            try writeAll(conn, self.service.hotkeySpec(self.io, &buf));
         } else if (mem.startsWith(u8, cmd, "TRANSFORM:")) {
             try self.handleTransform(conn, cmd["TRANSFORM:".len..], body);
         } else {
@@ -129,7 +135,7 @@ pub const Server = struct {
         };
         var aw: std.Io.Writer.Allocating = .init(self.gpa);
         defer aw.deinit();
-        try self.service.transformInto(self.gpa, &aw.writer, body, fmt);
+        try self.service.transformInto(self.io, self.gpa, &aw.writer, body, fmt);
         try writeAll(conn, aw.written());
     }
 };
@@ -221,15 +227,19 @@ const testing = std.testing;
 test "server round-trip: ping and transform" {
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
 
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     const cfg = try config.parse(testing.allocator,
         \\.{ .rules = .{ .{ .match = "*.ticketsystem.com/{id}", .display = "{id}" } } }
     , null);
-    var svc = service.Service.init(testing.allocator, undefined, "unused", cfg);
+    var svc = service.Service.init(testing.allocator, "unused", cfg);
     defer svc.deinit();
 
     var dummy: u8 = 0;
     const sock_path = "/tmp/clipmd-test.sock";
-    var server = try Server.init(testing.allocator, &svc, sock_path, null, &dummy);
+    var server = try Server.init(testing.allocator, io, &svc, sock_path, null, &dummy);
     defer server.deinit();
 
     const T = struct {

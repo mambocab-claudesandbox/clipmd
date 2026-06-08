@@ -37,6 +37,7 @@ const usage =
     \\  clipmd clip [-c CONFIG]                           transform the clipboard (macOS)
     \\  clipmd run                                        ask the daemon to transform the clipboard
     \\  clipmd send [-f md|html|rtf]                      pipe stdin through the daemon
+    \\  clipmd hotkey                                     print the daemon's active hotkey
     \\  clipmd config path|init|show [-c CONFIG]          manage configuration
     \\  clipmd version | help
     \\
@@ -89,6 +90,9 @@ pub fn main(init: std.process.Init) !u8 {
     if (mem.eql(u8, opts.command, "send")) {
         return cmdSend(gpa, io, init, opts.format);
     }
+    if (mem.eql(u8, opts.command, "hotkey")) {
+        return cmdHotkey(gpa, io, init);
+    }
 
     // Remaining commands need the rule engine.
     const cfg = loadConfig(gpa, io, cfg_path) catch |err| {
@@ -103,7 +107,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     // `clip` and `daemon` hand the config to a Service (which owns it).
-    var svc = service.Service.init(gpa, io, cfg_path.path, cfg);
+    var svc = service.Service.init(gpa, cfg_path.path, cfg);
     defer svc.deinit();
 
     if (mem.eql(u8, opts.command, "clip")) {
@@ -167,7 +171,7 @@ fn cmdClip(gpa: Allocator, io: std.Io, svc: *service.Service) !u8 {
         try writeStderr(io, "clip: the OS clipboard is only supported on macOS\n");
         return 1;
     }
-    const summary = clipboard.transformClipboard(gpa, svc) catch |err| {
+    const summary = clipboard.transformClipboard(io, gpa, svc) catch |err| {
         try printErr(io, "clip failed: {t}\n", .{err});
         return 1;
     };
@@ -175,20 +179,30 @@ fn cmdClip(gpa: Allocator, io: std.Io, svc: *service.Service) !u8 {
     return 0;
 }
 
-const ClipCtx = struct { gpa: Allocator, svc: *service.Service };
+const ClipCtx = struct { gpa: Allocator, io: std.Io, svc: *service.Service };
 
 fn clipThunk(ptr: *anyopaque) anyerror!ipc.ClipSummary {
     const ctx: *ClipCtx = @ptrCast(@alignCast(ptr));
-    return clipboard.transformClipboard(ctx.gpa, ctx.svc);
+    return clipboard.transformClipboard(ctx.io, ctx.gpa, ctx.svc);
+}
+
+/// Context + callback for the Linux/non-macOS file watcher (macOS wires its own
+/// in `app.run`, where it can also re-bind the hotkey).
+const ReloadCtx = struct { io: std.Io, svc: *service.Service };
+
+fn reloadThunk(ptr: ?*anyopaque) callconv(.c) void {
+    const ctx: *ReloadCtx = @ptrCast(@alignCast(ptr.?));
+    ctx.svc.reload(ctx.io) catch |err|
+        std.log.warn("config reload failed, keeping previous: {t}", .{err});
 }
 
 fn cmdDaemon(gpa: Allocator, io: std.Io, init: std.process.Init, svc: *service.Service) !u8 {
     const sock_path = try resolveSockPath(init.arena.allocator(), init);
 
-    var clip_ctx = ClipCtx{ .gpa = gpa, .svc = svc };
+    var clip_ctx = ClipCtx{ .gpa = gpa, .io = io, .svc = svc };
     const clip_fn: ?ipc.ClipFn = if (comptime is_macos) clipThunk else null;
 
-    var server = ipc.Server.init(gpa, svc, sock_path, clip_fn, &clip_ctx) catch |err| {
+    var server = ipc.Server.init(gpa, io, svc, sock_path, clip_fn, &clip_ctx) catch |err| {
         try printErr(io, "failed to start daemon socket at '{s}': {t}\n", .{ sock_path, err });
         return 1;
     };
@@ -196,26 +210,21 @@ fn cmdDaemon(gpa: Allocator, io: std.Io, init: std.process.Init, svc: *service.S
 
     try printErr(io, "clipmd daemon listening on {s}\n", .{sock_path});
 
-    // Hot-reload the config when its file changes (best-effort).
-    watcher.start(gpa, svc);
-    try printErr(io, "watching {s} for changes\n", .{cfgDir(svc.path)});
-
     if (comptime is_macos) {
         // Serve socket requests on a background thread; run the Cocoa event
-        // loop (menu bar + hotkey) on the main thread.
+        // loop on the main thread. `app.run` starts the config watcher itself
+        // (so reload can re-bind the hotkey on the main thread).
         const thread = try std.Thread.spawn(.{}, ipc.Server.run, .{&server});
         thread.detach();
         try printErr(io, "menu-bar item active; global hotkey: {s}\n", .{svc.cfg.hotkey_spec});
-        try app.run(gpa, svc);
+        try app.run(gpa, io, svc);
     } else {
-        try printErr(io, "(no menu bar on this platform; serving socket only)\n", .{});
+        var reload_ctx = ReloadCtx{ .io = io, .svc = svc };
+        watcher.start(gpa, svc.path, &reload_ctx, reloadThunk);
+        try printErr(io, "watching config for changes; serving socket only (no menu bar)\n", .{});
         server.run();
     }
     return 0;
-}
-
-fn cfgDir(path: []const u8) []const u8 {
-    return if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| (if (i == 0) "/" else path[0..i]) else ".";
 }
 
 fn cmdRun(gpa: Allocator, io: std.Io, init: std.process.Init) !u8 {
@@ -228,6 +237,17 @@ fn cmdRun(gpa: Allocator, io: std.Io, init: std.process.Init) !u8 {
     defer gpa.free(resp);
     try writeStdout(io, resp);
     return if (mem.startsWith(u8, resp, "OK")) 0 else 1;
+}
+
+fn cmdHotkey(gpa: Allocator, io: std.Io, init: std.process.Init) !u8 {
+    const sock_path = try resolveSockPath(init.arena.allocator(), init);
+    const resp = ipc.request(gpa, sock_path, "HOTKEY\n") catch |err| {
+        try printErr(io, "could not reach daemon at '{s}': {t}\n", .{ sock_path, err });
+        return 1;
+    };
+    defer gpa.free(resp);
+    try printOut(io, "{s}\n", .{resp});
+    return 0;
 }
 
 fn cmdSend(gpa: Allocator, io: std.Io, init: std.process.Init, fmt: transform.Format) !u8 {

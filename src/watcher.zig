@@ -1,4 +1,4 @@
-//! Watch the config file's directory and hot-reload on change.
+//! Watch the config file's directory and invoke a callback on change.
 //!
 //! We watch the *directory*, not the file, because editors typically save
 //! atomically (write a temp file, then rename over the original) — a watch on
@@ -6,27 +6,35 @@
 //! catches create/rename/close-write of the config's basename.
 //!
 //! Linux: inotify on a background thread.
-//! macOS: a libdispatch VNODE source on a global queue (no extra thread, no
-//!        run-loop dependency). Compiled but only linkable on macOS.
+//! macOS: a libdispatch VNODE source on the *main* queue, so the callback runs
+//!        on the main thread (where it may re-bind the global hotkey). Compiled
+//!        but only linkable on macOS.
+//!
+//! The callback and its context are supplied by the caller (dependency
+//! injection) rather than hard-wired here.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const service = @import("service.zig");
+
+/// Change callback. Uses the C calling convention so it can also serve directly
+/// as a libdispatch event handler. Receives the caller-supplied context.
+pub const OnChange = *const fn (?*anyopaque) callconv(.c) void;
 
 const is_macos = builtin.os.tag == .macos;
 const is_linux = builtin.os.tag == .linux;
 
-/// Begin watching the directory containing `svc.path`. Best-effort: on failure
-/// the daemon keeps running without hot reload.
-pub fn start(gpa: Allocator, svc: *service.Service) void {
-    const dir = dirOf(svc.path);
+/// Begin watching the directory containing `path`, calling `on_change(context)`
+/// on each change. Best-effort: on failure the daemon keeps running without
+/// hot reload.
+pub fn start(gpa: Allocator, path: []const u8, context: ?*anyopaque, on_change: OnChange) void {
+    const dir = dirOf(path);
     if (comptime is_linux) {
-        startLinux(gpa, svc, dir) catch |err| {
+        startLinux(gpa, path, dir, context, on_change) catch |err| {
             std.log.warn("config watch disabled: {t}", .{err});
         };
     } else if (comptime is_macos) {
-        startMacos(gpa, svc, dir) catch |err| {
+        startMacos(gpa, dir, context, on_change) catch |err| {
             std.log.warn("config watch disabled: {t}", .{err});
         };
     }
@@ -49,13 +57,13 @@ fn baseOf(path: []const u8) []const u8 {
 // ---------------------------------------------------------------------------
 
 const LinuxCtx = struct {
-    gpa: Allocator,
-    svc: *service.Service,
     fd: i32,
     base: []const u8,
+    context: ?*anyopaque,
+    on_change: OnChange,
 };
 
-fn startLinux(gpa: Allocator, svc: *service.Service, dir: []const u8) !void {
+fn startLinux(gpa: Allocator, path: []const u8, dir: []const u8, context: ?*anyopaque, on_change: OnChange) !void {
     const linux = std.os.linux;
 
     const init_rc = linux.inotify_init1(0);
@@ -69,7 +77,7 @@ fn startLinux(gpa: Allocator, svc: *service.Service, dir: []const u8) !void {
     if (isErr(linux.inotify_add_watch(fd, dir_z, mask))) return error.InotifyAddWatch;
 
     const ctx = try gpa.create(LinuxCtx);
-    ctx.* = .{ .gpa = gpa, .svc = svc, .fd = fd, .base = try gpa.dupe(u8, baseOf(svc.path)) };
+    ctx.* = .{ .fd = fd, .base = try gpa.dupe(u8, baseOf(path)), .context = context, .on_change = on_change };
 
     const thread = try std.Thread.spawn(.{}, linuxLoop, .{ctx});
     thread.detach();
@@ -90,7 +98,7 @@ fn linuxLoop(ctx: *LinuxCtx) void {
             }
             off += @sizeOf(linux.inotify_event) + ev.len;
         }
-        if (hit) reload(ctx.svc);
+        if (hit) ctx.on_change(ctx.context);
     }
 }
 
@@ -99,7 +107,7 @@ fn isErr(rc: usize) bool {
 }
 
 // ---------------------------------------------------------------------------
-// macOS: libdispatch VNODE source
+// macOS: libdispatch VNODE source on the main queue
 // ---------------------------------------------------------------------------
 
 const dispatch_queue_t = ?*anyopaque;
@@ -107,9 +115,9 @@ const dispatch_source_t = ?*anyopaque;
 const dispatch_source_type_t = *const anyopaque;
 
 extern var _dispatch_source_type_vnode: anyopaque;
-extern fn dispatch_get_global_queue(identifier: isize, flags: usize) dispatch_queue_t;
+extern var _dispatch_main_q: anyopaque;
 extern fn dispatch_source_create(t: dispatch_source_type_t, handle: usize, mask: usize, queue: dispatch_queue_t) dispatch_source_t;
-extern fn dispatch_source_set_event_handler_f(source: dispatch_source_t, handler: *const fn (?*anyopaque) callconv(.c) void) void;
+extern fn dispatch_source_set_event_handler_f(source: dispatch_source_t, handler: OnChange) void;
 extern fn dispatch_set_context(object: ?*anyopaque, context: ?*anyopaque) void;
 extern fn dispatch_resume(object: ?*anyopaque) void;
 
@@ -123,31 +131,19 @@ const O_EVTONLY: c_int = 0x8000;
 var mac_source: dispatch_source_t = null;
 var mac_fd: c_int = -1;
 
-fn startMacos(gpa: Allocator, svc: *service.Service, dir: []const u8) !void {
+fn startMacos(gpa: Allocator, dir: []const u8, context: ?*anyopaque, on_change: OnChange) !void {
     const dir_z = try gpa.dupeZ(u8, dir);
     defer gpa.free(dir_z);
 
     mac_fd = std.c.open(dir_z, .{ .ACCMODE = .RDONLY, .EVTONLY = true }, @as(c_uint, 0));
     if (mac_fd < 0) return error.OpenDir;
 
-    const queue = dispatch_get_global_queue(0, 0);
     const mask = DISPATCH_VNODE_WRITE | DISPATCH_VNODE_DELETE | DISPATCH_VNODE_RENAME | DISPATCH_VNODE_EXTEND;
-    const src = dispatch_source_create(&_dispatch_source_type_vnode, @intCast(mac_fd), mask, queue) orelse
+    const src = dispatch_source_create(&_dispatch_source_type_vnode, @intCast(mac_fd), mask, &_dispatch_main_q) orelse
         return error.SourceCreate;
 
-    dispatch_set_context(src, svc);
-    dispatch_source_set_event_handler_f(src, macosHandler);
+    dispatch_set_context(src, context);
+    dispatch_source_set_event_handler_f(src, on_change);
     dispatch_resume(src);
     mac_source = src;
-}
-
-fn macosHandler(ctx: ?*anyopaque) callconv(.c) void {
-    const svc: *service.Service = @ptrCast(@alignCast(ctx.?));
-    reload(svc);
-}
-
-// ---------------------------------------------------------------------------
-
-fn reload(svc: *service.Service) void {
-    svc.reload() catch |err| std.log.warn("config reload failed, keeping previous: {t}", .{err});
 }

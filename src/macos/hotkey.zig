@@ -2,7 +2,9 @@
 //!
 //! `RegisterEventHotKey` provides a system-wide hotkey that, unlike an
 //! `NSEvent` global monitor, does not require Accessibility permissions. The
-//! key combination is configurable (see `keybind.zig`).
+//! key combination is configurable (see `keybind.zig`) and can be re-bound at
+//! runtime with `setHotKey` (used when the config hot-reloads). The fire
+//! callback's context is threaded through Carbon's `userData`, not a global.
 
 const std = @import("std");
 const keybind = @import("../keybind.zig");
@@ -27,7 +29,6 @@ const EventTypeSpec = extern struct {
 const EventHandlerProcPtr = *const fn (EventHandlerCallRef, EventRef, ?*anyopaque) callconv(.c) OSStatus;
 
 extern fn GetApplicationEventTarget() EventTargetRef;
-extern fn NewEventHandlerUPP(proc: EventHandlerProcPtr) EventHandlerProcPtr;
 extern fn InstallEventHandler(
     target: EventTargetRef,
     handler: EventHandlerProcPtr,
@@ -44,6 +45,7 @@ extern fn RegisterEventHotKey(
     options: u32,
     out_ref: *EventHotKeyRef,
 ) OSStatus;
+extern fn UnregisterEventHotKey(hot_key_ref: EventHotKeyRef) OSStatus;
 
 const kEventClassKeyboard: u32 = fourCC("keyb");
 const kEventHotKeyPressed: u32 = 6;
@@ -52,26 +54,40 @@ fn fourCC(comptime s: *const [4]u8) u32 {
     return (@as(u32, s[0]) << 24) | (@as(u32, s[1]) << 16) | (@as(u32, s[2]) << 8) | @as(u32, s[3]);
 }
 
-var on_fire: ?*const fn () void = null;
+/// Fire callback, invoked on the main thread with the context passed to
+/// `install` (delivered via Carbon's `userData`).
+const FireFn = *const fn (?*anyopaque) void;
+
+var on_fire: ?FireFn = null;
 var hotkey_ref: EventHotKeyRef = null;
 
-fn handler(_: EventHandlerCallRef, _: EventRef, _: ?*anyopaque) callconv(.c) OSStatus {
-    if (on_fire) |cb| cb();
+fn handler(_: EventHandlerCallRef, _: EventRef, user_data: ?*anyopaque) callconv(.c) OSStatus {
+    if (on_fire) |cb| cb(user_data);
     return 0; // noErr
 }
 
-/// Install the global hotkey handler and register `combo`. `callback` runs on
-/// the main thread each time the hotkey fires.
-pub fn install(combo: keybind.Combo, callback: *const fn () void) !void {
-    on_fire = callback;
+/// Install the Carbon event handler once and register `combo`. `fire` runs on
+/// the main thread each time the hotkey fires, receiving `context`.
+pub fn install(combo: keybind.Combo, fire: FireFn, context: ?*anyopaque) !void {
+    on_fire = fire;
 
     const spec = EventTypeSpec{
         .event_class = kEventClassKeyboard,
         .event_kind = kEventHotKeyPressed,
     };
-    if (InstallEventHandler(GetApplicationEventTarget(), handler, 1, @ptrCast(&spec), null, null) != 0)
+    if (InstallEventHandler(GetApplicationEventTarget(), handler, 1, @ptrCast(&spec), context, null) != 0)
         return error.InstallHandlerFailed;
 
+    try setHotKey(combo);
+}
+
+/// (Re-)bind the global hotkey to `combo`, unregistering any previous binding.
+/// Safe to call repeatedly (e.g. after a config reload). Main thread only.
+pub fn setHotKey(combo: keybind.Combo) !void {
+    if (hotkey_ref) |ref| {
+        _ = UnregisterEventHotKey(ref);
+        hotkey_ref = null;
+    }
     const hk_id = EventHotKeyID{ .signature = fourCC("clpm"), .id = 1 };
     if (RegisterEventHotKey(combo.key_code, combo.modifiers, hk_id, GetApplicationEventTarget(), 0, &hotkey_ref) != 0)
         return error.RegisterHotKeyFailed;

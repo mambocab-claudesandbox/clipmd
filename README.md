@@ -77,8 +77,9 @@ because editors save atomically by writing a temp file and renaming over the
 original, which would otherwise leave a file watch stale.) A reload that fails
 to parse is logged and ignored; the daemon keeps serving the last good config.
 The mechanism is `inotify` on Linux and a libdispatch `VNODE` source on macOS.
-A changed `hotkey` takes effect on the next daemon start (the binding isn't
-re-registered live).
+A changed `hotkey` is re-bound live: on macOS the watcher callback runs on the
+main thread and re-registers the Carbon hotkey, so edits take effect without a
+restart.
 
 ### Keybinding (`hotkey`)
 
@@ -188,6 +189,7 @@ clipmd daemon [-c CONFIG]                         run the menu-bar / socket daem
 clipmd clip [-c CONFIG]                           transform the macOS clipboard in place
 clipmd run                                        ask the daemon to transform the clipboard
 clipmd send [-f md|html|rtf]                      pipe stdin through the daemon
+clipmd hotkey                                     print the daemon's active hotkey
 clipmd config path|init|show [-c CONFIG]          manage configuration
 clipmd version | help
 ```
@@ -272,6 +274,7 @@ reads to EOF, replies, and closes:
 
 ```
 PING\n                      -> PONG\n
+HOTKEY\n                    -> <active hotkey spec>
 CLIP\n                      -> OK matched=<n> total=<m>\n   (or ERR ...)
 TRANSFORM:<fmt>\n<body...>  -> <transformed body>
 ```

@@ -71,6 +71,25 @@ EOF
   [ "$ok" -eq 1 ]
 }
 
+@test "daemon: hot-reloads the hotkey setting (re-bound live on macOS)" {
+  [[ "$(uname)" =~ ^(Linux|Darwin)$ ]] || skip "file watcher is Linux/macOS only"
+  start_daemon
+
+  run "$CLIPMD_BIN" hotkey
+  [ "$output" = "cmd+shift+m" ]
+
+  cat > "$CLIPMD_CONFIG" <<'EOF'
+.{ .hotkey = "ctrl+opt+t", .rules = .{} }
+EOF
+
+  local ok=0
+  for _ in $(seq 1 50); do
+    if [ "$("$CLIPMD_BIN" hotkey)" = "ctrl+opt+t" ]; then ok=1; break; fi
+    sleep 0.1
+  done
+  [ "$ok" -eq 1 ]
+}
+
 @test "daemon: a broken config edit is ignored (keeps serving)" {
   [[ "$(uname)" =~ ^(Linux|Darwin)$ ]] || skip "file watcher is Linux/macOS only"
   start_daemon
