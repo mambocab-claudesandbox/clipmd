@@ -7,13 +7,12 @@
 const std = @import("std");
 const Writer = std.Io.Writer;
 
-/// Document preamble: a single Helvetica font and a color table whose entry 1
-/// is the conventional hyperlink blue.
-pub const header =
-    "{\\rtf1\\ansi\\ansicpg1252\\cocoartf2580" ++
-    "{\\fonttbl\\f0\\fswiss\\fcharset0 Helvetica;}" ++
-    "{\\colortbl;\\red0\\green0\\blue238;}" ++
-    "\\f0\\fs24 ";
+/// Document preamble. Deliberately minimal: no font table, no color table, and
+/// no font/size/paragraph selectors, so that when the fragment is pasted into an
+/// existing document the inserted text inherits the destination's current
+/// formatting. `\ansicpg1252` only declares the code page for the rare `\'hh`
+/// byte-escape fallback; it imposes no visual style.
+pub const header = "{\\rtf1\\ansi\\ansicpg1252 ";
 
 pub const footer = "}";
 
@@ -70,11 +69,13 @@ fn writeUnicode(w: *Writer, cp: u21) !void {
     }
 }
 
-/// Write a hyperlink field: displays `text`, links to `url`.
+/// Write a hyperlink field: displays `text`, links to `url`. The result run is
+/// left unstyled so it inherits the destination document's formatting (the URL
+/// is still a real, clickable link via the field).
 pub fn writeLink(w: *Writer, url: []const u8, text: []const u8) !void {
     try w.writeAll("{\\field{\\*\\fldinst{HYPERLINK \"");
     try writeUrl(w, url);
-    try w.writeAll("\"}}{\\fldrslt \\cf1 \\ul ");
+    try w.writeAll("\"}}{\\fldrslt ");
     try writeText(w, text);
     try w.writeAll("}}");
 }
@@ -125,7 +126,7 @@ test "hyperlink field" {
     const out = try render(writeLink, .{ "https://x.com/1", "TICKET-1" });
     defer testing.allocator.free(out);
     try testing.expectEqualStrings(
-        "{\\field{\\*\\fldinst{HYPERLINK \"https://x.com/1\"}}{\\fldrslt \\cf1 \\ul TICKET-1}}",
+        "{\\field{\\*\\fldinst{HYPERLINK \"https://x.com/1\"}}{\\fldrslt TICKET-1}}",
         out,
     );
 }
