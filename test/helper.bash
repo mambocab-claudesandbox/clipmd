@@ -51,10 +51,16 @@ teardown_clipmd_env() {
 
 # Start the daemon in the background and wait until its socket answers PING.
 start_daemon() {
-  "$CLIPMD_BIN" daemon >/dev/null 2>&1 &
+  CLIPMD_DAEMON_LOG="${TMP}/daemon.log"
+  "$CLIPMD_BIN" daemon >"$CLIPMD_DAEMON_LOG" 2>&1 &
   CLIPMD_DAEMON_PID=$!
+  # The socket comes up before the macOS file watcher is attached. Wait
+  # until the daemon prints its "ready" line so hot-reload tests don't race
+  # the watcher setup.
   for _ in $(seq 1 50); do
-    [[ -S "$CLIPMD_SOCK" ]] && return 0
+    if [[ -S "$CLIPMD_SOCK" ]] && grep -q 'clipmd daemon ready' "$CLIPMD_DAEMON_LOG" 2>/dev/null; then
+      return 0
+    fi
     sleep 0.1
   done
   return 1

@@ -222,6 +222,7 @@ fn cmdDaemon(gpa: Allocator, io: std.Io, init: std.process.Init, svc: *service.S
         var reload_ctx = ReloadCtx{ .io = io, .svc = svc };
         watcher.start(gpa, svc.path, &reload_ctx, reloadThunk);
         try printErr(io, "watching config for changes; serving socket only (no menu bar)\n", .{});
+        try printErr(io, "clipmd daemon ready\n", .{});
         server.run();
     }
     return 0;

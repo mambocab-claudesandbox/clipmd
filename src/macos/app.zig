@@ -131,5 +131,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, svc: *service.Service) !void {
         watcher.start(gpa, svc.path, &ctx, onConfigChanged);
     }
 
+    // Tell anyone watching stderr that the daemon is fully set up. The bats
+    // tests block on this line — before it, the socket is up but the file
+    // watcher may not yet be attached, which would race a config edit.
+    std.debug.print("clipmd daemon ready\n", .{});
+
     objc.msgSend(void, app, "run", .{});
 }
