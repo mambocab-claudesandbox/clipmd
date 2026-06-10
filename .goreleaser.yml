@@ -1,0 +1,33 @@
+version: 2
+project_name: clipmd
+
+# Only Linux prebuilts are shipped from goreleaser. macOS users install via
+# the Homebrew tap, which builds from source against the host SDK — that
+# avoids a cross-compile against a vendored macOS SDK here.
+builds:
+  - id: clipmd
+    builder: zig
+    binary: clipmd
+    flags:
+      - -Doptimize=ReleaseFast
+    targets:
+      - x86_64-linux-musl
+      - aarch64-linux-musl
+
+archives:
+  - formats:
+      - tar.gz
+    files:
+      - README.md
+      - config.example.zon
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: git
+
+release:
+  github:
+    owner: mambocab-claudesandbox
+    name: clipmd
