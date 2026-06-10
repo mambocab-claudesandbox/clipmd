@@ -2,6 +2,8 @@
 //! them all. The macOS-only modules are compile-checked separately (they
 //! require the macOS SDK to link).
 
+const builtin = @import("builtin");
+
 test {
     _ = @import("pattern.zig");
     _ = @import("rtf.zig");
@@ -10,4 +12,7 @@ test {
     _ = @import("ipc.zig");
     _ = @import("keybind.zig");
     _ = @import("service.zig");
+    if (builtin.os.tag == .macos) {
+        _ = @import("macos/app.zig");
+    }
 }

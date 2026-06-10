@@ -66,16 +66,27 @@ inline fn ctxFrom(ptr: ?*anyopaque) *AppContext {
     return @ptrCast(@alignCast(ptr.?));
 }
 
-/// Objective-C method body for `-transformClipboard:`. Recovers its context
-/// from the instance's indexed ivars.
+/// Read the AppContext pointer back out of a delegate's indexed ivars. The
+/// slot holds a *pointer* to the context (written by `makeDelegate`), so
+/// this is a double-pointer load. Factored so the round-trip is unit-tested
+/// — getting the dereference level wrong here used to silently corrupt the
+/// trigger path and crash the first time the menu item was clicked.
+fn ctxFromDelegate(self: id) *AppContext {
+    const slot: **AppContext = @ptrCast(@alignCast(objc.object_getIndexedIvars(self).?));
+    return slot.*;
+}
+
+/// Objective-C method body for `-transformClipboard:`.
 fn transformClipboardAction(self: id, _: objc.SEL, _: id) callconv(.c) void {
-    trigger(@ptrCast(@alignCast(objc.object_getIndexedIvars(self).?)));
+    trigger(ctxFromDelegate(self));
 }
 
 /// Build a delegate object that responds to `-transformClipboard:` and carries
-/// `ctx` in its indexed ivars.
-fn makeDelegate(ctx: *AppContext) id {
-    const cls = objc.objc_allocateClassPair(objc.getClass("NSObject"), "ClipmdDelegate", @sizeOf(*AppContext));
+/// `ctx` in its indexed ivars. `class_name` is parameterized so tests can
+/// register a separate class and avoid collisions with the production one
+/// when both end up in the same process (e.g. under `zig build test`).
+fn makeDelegateNamed(class_name: [*:0]const u8, ctx: *AppContext) id {
+    const cls = objc.objc_allocateClassPair(objc.getClass("NSObject"), class_name, @sizeOf(*AppContext));
     _ = objc.class_addMethod(cls, objc.sel("transformClipboard:"), @ptrCast(&transformClipboardAction), "v@:@");
     objc.objc_registerClassPair(cls);
 
@@ -85,6 +96,10 @@ fn makeDelegate(ctx: *AppContext) id {
     return obj;
 }
 
+fn makeDelegate(ctx: *AppContext) id {
+    return makeDelegateNamed("ClipmdDelegate", ctx);
+}
+
 /// Run the menu-bar app. Blocks in the Cocoa event loop until the user quits.
 pub fn run(gpa: std.mem.Allocator, io: std.Io, svc: *service.Service) !void {
     var ctx = AppContext{ .gpa = gpa, .io = io, .service = svc };
@@ -92,15 +107,22 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, svc: *service.Service) !void {
 
     {
         // One pool drains every transient object created during setup. The
-        // status item (retained by the status bar), the menu, and the delegate
-        // (both owned via alloc/init) outlive it.
+        // menu and the delegate are alloc/init'd (so they own a +1 refcount);
+        // the status item is autoreleased, so it gets an explicit retain
+        // below before this pool drains.
         const pool = objc.AutoreleasePool.init();
         defer pool.deinit();
 
         _ = objc.msgSend(bool, app, "setActivationPolicy:", .{NSApplicationActivationPolicyAccessory});
 
         const bar = objc.msgSend(id, objc.getClass("NSStatusBar"), "systemStatusBar", .{});
+        // `statusItemWithLength:` returns an *autoreleased* NSStatusItem —
+        // the status bar does not retain it. Without an explicit retain it
+        // would be freed when this autorelease pool drains, taking the menu
+        // bar item with it and leaving every later access dangling (which
+        // segfaults the Carbon hotkey handler the first time it fires).
         ctx.status_item = objc.msgSend(id, bar, "statusItemWithLength:", .{NSVariableStatusItemLength});
+        _ = objc.msgSend(id, ctx.status_item, "retain", .{});
         setTitle(&ctx, "⧉");
 
         const delegate = makeDelegate(&ctx);
@@ -137,4 +159,21 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, svc: *service.Service) !void {
     std.debug.print("clipmd daemon ready\n", .{});
 
     objc.msgSend(void, app, "run", .{});
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "delegate ivars round-trip the AppContext pointer" {
+    // Regression for a menu-click crash: makeDelegate stores the AppContext
+    // as a *pointer* in the indexed ivars, but transformClipboardAction was
+    // casting the slot's address straight to *AppContext (one dereference
+    // missing), turning every click into a use of garbage. Now that the
+    // load lives in ctxFromDelegate, lock the round-trip in here.
+    var fake_ctx: AppContext = undefined;
+    const delegate = makeDelegateNamed("ClipmdDelegateTest", &fake_ctx);
+    try testing.expectEqual(@as(*AppContext, &fake_ctx), ctxFromDelegate(delegate));
 }

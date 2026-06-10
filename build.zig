@@ -34,6 +34,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_mod.link_libc = true;
+    // The macOS app tests poke at the Obj-C runtime (delegate ivar
+    // round-trips), so they need the same frameworks the real binary links.
+    if (target.result.os.tag == .macos) {
+        test_mod.linkFramework("AppKit", .{});
+        test_mod.linkFramework("Carbon", .{});
+        test_mod.linkFramework("Foundation", .{});
+    }
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
