@@ -26,7 +26,7 @@ const watcher = @import("watcher.zig");
 const is_macos = builtin.os.tag == .macos;
 const app = if (is_macos) @import("macos/app.zig") else struct {};
 
-const version = "0.1.0";
+const version = "0.1.1";
 
 const usage =
     \\clipmd — transform clipboard/stdin URLs into Markdown + rich hyperlinks

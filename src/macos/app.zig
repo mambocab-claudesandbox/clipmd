@@ -21,6 +21,22 @@ const id = objc.id;
 const NSApplicationActivationPolicyAccessory: c_long = 1;
 const NSVariableStatusItemLength: f64 = -1.0;
 
+const idle_title: [*:0]const u8 = "⧉";
+
+// libdispatch glue for the status-icon auto-revert. We schedule a
+// `setTitle(idle)` on the main queue a short time after each click; a
+// generation counter prevents an early revert from a previous click from
+// stomping on the visible state of a fresher one.
+const dispatch_queue_t = ?*anyopaque;
+extern var _dispatch_main_q: anyopaque;
+extern fn dispatch_after_f(when: u64, queue: dispatch_queue_t, ctx: ?*anyopaque, work: *const fn (?*anyopaque) callconv(.c) void) void;
+extern fn dispatch_time(when: u64, delta: i64) u64;
+const DISPATCH_TIME_NOW: u64 = 0;
+const revert_after_ns: i64 = 1_500_000_000;
+
+var icon_revert_ctx: ?*AppContext = null;
+var icon_gen: usize = 0;
+
 /// Everything the callbacks need. Created in `run` (which never returns), so a
 /// pointer to it is valid for the process lifetime.
 const AppContext = struct {
@@ -34,10 +50,31 @@ const AppContext = struct {
 /// clipboard and reflect the outcome briefly in the status-item title.
 fn trigger(ctx: *AppContext) void {
     const summary = clipboard.transformClipboard(ctx.io, ctx.gpa, ctx.service) catch {
-        setTitle(ctx, "⚠");
+        flashTitle(ctx, "⚠");
         return;
     };
-    setTitle(ctx, if (summary.total == 0) "∅" else "✓");
+    flashTitle(ctx, if (summary.total == 0) "∅" else "✓");
+}
+
+/// Set the status-item title and schedule it to revert to the idle glyph
+/// after `revert_after_ns`. Latest click wins: each call bumps `icon_gen` and
+/// the scheduled revert no-ops unless its captured generation still matches.
+fn flashTitle(ctx: *AppContext, text: [*:0]const u8) void {
+    setTitle(ctx, text);
+    icon_gen +%= 1;
+    icon_revert_ctx = ctx;
+    dispatch_after_f(
+        dispatch_time(DISPATCH_TIME_NOW, revert_after_ns),
+        &_dispatch_main_q,
+        @ptrFromInt(icon_gen),
+        revertIconCallback,
+    );
+}
+
+fn revertIconCallback(captured: ?*anyopaque) callconv(.c) void {
+    const my_gen = @intFromPtr(captured);
+    if (my_gen != icon_gen) return;
+    if (icon_revert_ctx) |ctx| setTitle(ctx, idle_title);
 }
 
 fn setTitle(ctx: *AppContext, text: [*:0]const u8) void {
@@ -123,7 +160,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, svc: *service.Service) !void {
         // segfaults the Carbon hotkey handler the first time it fires).
         ctx.status_item = objc.msgSend(id, bar, "statusItemWithLength:", .{NSVariableStatusItemLength});
         _ = objc.msgSend(id, ctx.status_item, "retain", .{});
-        setTitle(&ctx, "⧉");
+        setTitle(&ctx, idle_title);
 
         const delegate = makeDelegate(&ctx);
 
