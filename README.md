@@ -15,11 +15,13 @@ item (or a global hotkey), and your clipboard now holds:
 The exact same transformation is available from the command line over pipes, and
 there's a daemon mode that backs both the menu bar and the CLI.
 
-Written in [Zig](https://ziglang.org) (0.16). The macOS menu bar and pasteboard
-access are a thin **Swift** AppKit shim that exposes plain C functions; Zig owns
-everything else and calls across that boundary (the global hotkey still talks to
-Carbon directly from Zig). No third-party packages, and **no `.app` bundle**: the
-CLI hosts the menu bar itself when run as `clipmd daemon`.
+Written in [Zig](https://ziglang.org) (0.16). The macOS platform layer is a thin
+**Swift** shim that exposes plain C functions — the menu bar and pasteboard
+(AppKit), the global hotkey (Carbon), and the macOS config-file watcher
+(libdispatch) all live there. Zig owns the transform engine, config, CLI, and
+the Linux watcher, and calls across that boundary. No third-party packages, and
+**no `.app` bundle**: the CLI hosts the menu bar itself when run as
+`clipmd daemon`.
 
 ---
 
@@ -254,15 +256,15 @@ src/
   keybind.zig         parse "cmd+shift+m" -> Carbon key code + modifier mask
   rtf.zig             RTF document + hyperlink-field generation
   service.zig         thread-safe live config holder + hot reload
-  watcher.zig         config-dir file watcher (inotify / dispatch VNODE)
+  watcher.zig         config-dir file watcher (Linux inotify; macOS via Swift)
   ipc.zig             Unix-socket daemon server + client (libc sockets)
   clipboard.zig       platform clipboard abstraction
   macos/
-    clipmd_macos.swift  Swift AppKit shim: pasteboard + status-item menu (C ABI)
+    clipmd_macos.swift  Swift shim: pasteboard, menu, Carbon hotkey, watcher (C ABI)
     ffi.zig           extern fn declarations of the Swift C-ABI surface
     pasteboard.zig    NSPasteboard read / multi-type write (marshals to Swift)
-    app.zig           status-item flash, hotkey/watcher wiring, event loop
-    hotkey.zig        Carbon global hotkey (configurable)
+    app.zig           trigger action + hotkey/watcher wiring, event loop
+    hotkey.zig        Combo -> Swift hotkey install/re-bind (thin wrapper)
 test/
   transform.bats     portable end-to-end CLI tests (pipes, daemon, config)
   clipboard.bats     macOS pasteboard tests (skip off macOS)
