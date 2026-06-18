@@ -15,10 +15,13 @@ item (or a global hotkey), and your clipboard now holds:
 The exact same transformation is available from the command line over pipes, and
 there's a daemon mode that backs both the menu bar and the CLI.
 
-Written in [Zig](https://ziglang.org) (0.16). The macOS GUI talks directly to
-AppKit/Carbon through the Objective-C runtime — no Objective-C, Swift, or
-third-party packages, and **no `.app` bundle**: the CLI hosts the menu bar
-itself when run as `clipmd daemon`.
+Written in [Zig](https://ziglang.org) (0.16). The macOS platform layer is a thin
+**Swift** shim that exposes plain C functions — the menu bar and pasteboard
+(AppKit), the global hotkey (Carbon), and the macOS config-file watcher
+(libdispatch) all live there. Zig owns the transform engine, config, CLI, and
+the Linux watcher, and calls across that boundary. No third-party packages, and
+**no `.app` bundle**: the CLI hosts the menu bar itself when run as
+`clipmd daemon`.
 
 ---
 
@@ -125,7 +128,9 @@ trimmed, so `Fixed in https://github.com/ziglang/zig/pull/42.` works.
 
 ## Build
 
-Requires Zig **0.16.0**.
+Requires Zig **0.16.0**. A native macOS build also needs the **Swift toolchain**
+(Xcode or the Command Line Tools) — `build.zig` invokes `swiftc` to compile the
+AppKit shim and links the resulting object. Non-macOS builds need only Zig.
 
 ```sh
 zig build              # produces zig-out/bin/clipmd
@@ -173,11 +178,13 @@ hotkey, so `clipmd daemon` is all you need. To start it at login, point a
 launchd agent at `clipmd daemon` (`~/Library/LaunchAgents/…plist` with
 `ProgramArguments` `["/usr/local/bin/clipmd", "daemon"]`).
 
-> This project is developed in a Linux sandbox without the macOS SDK, so it
-> cannot *link* the final Mac binary here. The macOS sources are continuously
-> compile-checked for the `aarch64-macos` target with `zig build check-macos`
-> (full semantic analysis + codegen, no link). Linking happens on a Mac via
-> `zig build`.
+> This project is developed in a Linux sandbox without the macOS SDK or the
+> Swift toolchain, so it cannot *link* the final Mac binary here. The Zig half
+> of the macOS layer — including the `extern fn` declarations of the Swift
+> C-ABI surface — is continuously compile-checked for the `aarch64-macos`
+> target with `zig build check-macos` (full semantic analysis + codegen, no
+> link). The Swift shim itself (`src/macos/clipmd_macos.swift`) is compiled by
+> `swiftc` and linked on a Mac via `zig build`.
 
 ---
 
@@ -249,14 +256,15 @@ src/
   keybind.zig         parse "cmd+shift+m" -> Carbon key code + modifier mask
   rtf.zig             RTF document + hyperlink-field generation
   service.zig         thread-safe live config holder + hot reload
-  watcher.zig         config-dir file watcher (inotify / dispatch VNODE)
+  watcher.zig         config-dir file watcher (Linux inotify; macOS via Swift)
   ipc.zig             Unix-socket daemon server + client (libc sockets)
   clipboard.zig       platform clipboard abstraction
   macos/
-    objc.zig          minimal Objective-C runtime bindings + msgSend
-    pasteboard.zig    NSPasteboard read / multi-type write
-    app.zig           NSStatusItem menu, app lifecycle, event loop
-    hotkey.zig        Carbon global hotkey (configurable)
+    clipmd_macos.swift  Swift shim: pasteboard, menu, Carbon hotkey, watcher (C ABI)
+    ffi.zig           extern fn declarations of the Swift C-ABI surface
+    pasteboard.zig    NSPasteboard read / multi-type write (marshals to Swift)
+    app.zig           trigger action + hotkey/watcher wiring, event loop
+    hotkey.zig        Combo -> Swift hotkey install/re-bind (thin wrapper)
 test/
   transform.bats     portable end-to-end CLI tests (pipes, daemon, config)
   clipboard.bats     macOS pasteboard tests (skip off macOS)

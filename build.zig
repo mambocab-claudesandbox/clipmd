@@ -17,6 +17,10 @@ pub fn build(b: *std.Build) void {
         exe_mod.linkFramework("AppKit", .{});
         exe_mod.linkFramework("Carbon", .{});
         exe_mod.linkFramework("Foundation", .{});
+        // Compile the Swift AppKit layer and link its object. This needs the
+        // Swift toolchain (Xcode / Command Line Tools), so it only runs for a
+        // native macOS build — the same place the final link already happens.
+        linkSwiftLayer(b, exe_mod);
     }
 
     const exe = b.addExecutable(.{ .name = "clipmd", .root_module = exe_mod });
@@ -34,20 +38,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_mod.link_libc = true;
-    // The macOS app tests poke at the Obj-C runtime (delegate ivar
-    // round-trips), so they need the same frameworks the real binary links.
-    if (target.result.os.tag == .macos) {
-        test_mod.linkFramework("AppKit", .{});
-        test_mod.linkFramework("Carbon", .{});
-        test_mod.linkFramework("Foundation", .{});
-    }
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
-    // Compile-check the macOS GUI sources without linking (no SDK needed).
-    // Produces an object file via `zig build check-macos`.
+    // Compile-check the macOS GUI sources without linking (no SDK or Swift
+    // toolchain needed). This validates the Zig half of the macOS layer,
+    // including the `extern fn` declarations of the Swift C-ABI surface; the
+    // Swift implementation itself is only built by `swiftc` in a native
+    // macOS `zig build`. Produces an object file via `zig build check-macos`.
     const macos_check_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos }),
@@ -57,4 +57,30 @@ pub fn build(b: *std.Build) void {
     const macos_obj = b.addObject(.{ .name = "clipmd-macos-check", .root_module = macos_check_mod });
     const check_step = b.step("check-macos", "Compile-check the macOS sources (no link)");
     check_step.dependOn(&macos_obj.step);
+}
+
+/// Compile `src/macos/clipmd_macos.swift` to an object with `swiftc` and link
+/// it into `mod`. The Swift object carries Mach-O autolink hints for the Swift
+/// runtime that the linker honours; we add the active SDK's Swift library path
+/// (discovered via `xcrun`) so those hints resolve at link time. The runtime
+/// dylibs themselves ship with macOS (10.14.4+), so the final binary stays
+/// self-contained. `swiftc` defaults to the host architecture, matching a
+/// native `zig build`.
+fn linkSwiftLayer(b: *std.Build, mod: *std.Build.Module) void {
+    const swiftc = b.addSystemCommand(&.{
+        "swiftc",
+        "-O",
+        "-parse-as-library",
+        "-module-name",
+        "ClipmdMacOS",
+        "-emit-object",
+        "-o",
+    });
+    const swift_obj = swiftc.addOutputFileArg("clipmd_macos.o");
+    swiftc.addFileArg(b.path("src/macos/clipmd_macos.swift"));
+    mod.addObjectFile(swift_obj);
+
+    // Link-time stubs for the Swift runtime live under the SDK.
+    const sdk_path = std.mem.trimRight(u8, b.run(&.{ "xcrun", "--show-sdk-path" }), "\n");
+    mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "usr", "lib", "swift" }) });
 }
