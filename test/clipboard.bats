@@ -64,7 +64,6 @@ teardown() { teardown_clipmd_env; }
 
 # NOTE: there is intentionally no bats test for the NSStatusItem menu click
 # or the Carbon global hotkey here. Driving either requires an interactive
-# GUI session — but they each have their own glue (delegate ivars for the
-# menu, Carbon userData for the hotkey) that the socket `run` path doesn't
-# touch, so this suite would not catch a regression in those handlers. The
-# delegate-ivar round-trip is unit-tested in src/macos/app.zig instead.
+# GUI session — but they each have their own glue (the Swift menu target for
+# the menu, Carbon userData for the hotkey) that the socket `run` path doesn't
+# touch, so this suite would not catch a regression in those handlers.
