@@ -1,20 +1,22 @@
 //! The C-ABI surface implemented by the Swift macOS layer
 //! (`src/macos/clipmd_macos.swift`).
 //!
-//! This replaces the old hand-rolled Objective-C runtime binding (`objc.zig`
-//! and its `objc_msgSend` call sites): instead of poking the runtime from Zig,
-//! the AppKit work lives in a small Swift file that exports plain C functions
-//! via `@_cdecl`, which we declare here as `extern fn`. Zig keeps owning the
-//! business logic (transform/config/service) and hands the macOS bits across
-//! this boundary.
+//! This replaces the hand-rolled bindings that used to live on the Zig side:
+//! the Objective-C runtime (`objc_msgSend`) for AppKit, plus the direct Carbon
+//! and libdispatch `extern fn` declarations for the global hotkey, the status
+//! icon flash, and the config watcher. All of that now lives in a small Swift
+//! file that exports plain C functions via `@_cdecl`, declared here as
+//! `extern fn`. Zig keeps owning the business logic (transform/config/service)
+//! and hands the macOS bits across this boundary.
 //!
 //! These symbols are resolved at link time by the Swift object that `build.zig`
 //! compiles with `swiftc` (macOS only). They remain undefined in the
 //! `zig build check-macos` object — which is fine, since that step only does
 //! semantic analysis + codegen (no link).
 
-/// Action invoked by the Swift layer (a menu click) on the main thread. It is
-/// called with the opaque context pointer passed to `clipmd_app_setup`.
+/// Action invoked by the Swift layer (a menu click, a hotkey press, or a config
+/// change) on the main thread. It is called with the opaque context pointer
+/// passed alongside it.
 pub const TriggerFn = *const fn (?*anyopaque) callconv(.c) void;
 
 // ---------------------------------------------------------------------------
@@ -46,12 +48,34 @@ pub extern fn clipmd_free(ptr: ?*anyopaque) void;
 
 /// Build the accessory `NSApplication`, its status-bar item, and the menu.
 /// The "Transform Clipboard" item invokes `trigger(ctx)` on the main thread.
-/// `idle_title` is the initial status-item glyph. Must be called before
-/// `clipmd_app_run`.
+/// `idle_title` is the resting status-item glyph (also the target the flash
+/// reverts to). Must be called before `clipmd_app_run`.
 pub extern fn clipmd_app_setup(trigger: TriggerFn, ctx: ?*anyopaque, idle_title: [*:0]const u8) void;
 
-/// Set the status-item title. Main thread only.
-pub extern fn clipmd_status_set_title(text: [*:0]const u8) void;
+/// Flash a transient status-item title; the Swift layer reverts to the idle
+/// glyph after a short delay. Latest flash wins. Main thread only.
+pub extern fn clipmd_status_flash(text: [*:0]const u8) void;
 
 /// Run the Cocoa event loop. Does not return until the app terminates.
 pub extern fn clipmd_app_run() void;
+
+// ---------------------------------------------------------------------------
+// Global hotkey (Carbon, in the Swift layer)
+// ---------------------------------------------------------------------------
+
+/// Install the Carbon event handler (once) and register the hotkey. `fire(ctx)`
+/// runs on the main thread each time it fires. Returns false on failure.
+pub extern fn clipmd_hotkey_install(key_code: u32, modifiers: u32, fire: TriggerFn, ctx: ?*anyopaque) bool;
+
+/// Re-bind the global hotkey, unregistering any previous binding. Main thread
+/// only. Returns false on failure.
+pub extern fn clipmd_hotkey_set(key_code: u32, modifiers: u32) bool;
+
+// ---------------------------------------------------------------------------
+// Config-file watcher (libdispatch VNODE source, in the Swift layer)
+// ---------------------------------------------------------------------------
+
+/// Watch `path` (and its parent directory, to catch atomic saves), calling
+/// `on_change(ctx)` on the main thread for each change. Returns false if the
+/// watch could not be established.
+pub extern fn clipmd_watch_start(path: [*:0]const u8, on_change: TriggerFn, ctx: ?*anyopaque) bool;
