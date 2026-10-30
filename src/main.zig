@@ -35,6 +35,7 @@ const usage =
     \\  clipmd [transform] [-f md|html|rtf] [-c CONFIG]   transform stdin -> stdout
     \\  clipmd daemon [-c CONFIG]                         run the menu-bar / socket daemon
     \\  clipmd clip [-c CONFIG]                           transform the clipboard (macOS)
+    \\  clipmd service [-c CONFIG]                        run the macOS Services provider (replace selection)
     \\  clipmd run                                        ask the daemon to transform the clipboard
     \\  clipmd send [-f md|html|rtf]                      pipe stdin through the daemon
     \\  clipmd hotkey                                     print the daemon's active hotkey
@@ -69,6 +70,14 @@ pub fn main(init: std.process.Init) !u8 {
         try writeStderr(io, usage);
         return 2;
     };
+
+    // A macOS Services invocation launches the `clipmd.app` bundle with no CLI
+    // arguments (older systems may pass a `-psn_*` token). Fall into the
+    // Services provider in that case so the one binary serves both roles.
+    if (comptime is_macos) {
+        if (launchedFromBundle(arena) and (args.len <= 1 or mem.startsWith(u8, opts.command, "-psn")))
+            opts.command = "service";
+    }
 
     if (mem.eql(u8, opts.command, "help") or mem.eql(u8, opts.command, "--help") or mem.eql(u8, opts.command, "-h")) {
         try writeStdout(io, usage);
@@ -106,7 +115,8 @@ pub fn main(init: std.process.Init) !u8 {
         return cmdTransform(gpa, io, transform.Engine.init(&owned), opts.format);
     }
 
-    // `clip` and `daemon` hand the config to a Service (which owns it).
+    // `clip`, `daemon`, and `service` hand the config to a Service (which owns
+    // it).
     var svc = service.Service.init(gpa, cfg_path.path, cfg);
     defer svc.deinit();
 
@@ -114,6 +124,8 @@ pub fn main(init: std.process.Init) !u8 {
         return cmdClip(gpa, io, &svc);
     } else if (mem.eql(u8, opts.command, "daemon")) {
         return cmdDaemon(gpa, io, init, &svc);
+    } else if (mem.eql(u8, opts.command, "service")) {
+        return cmdService(gpa, io, &svc);
     }
 
     try printErr(io, "unknown command: {s}\n", .{opts.command});
@@ -177,6 +189,26 @@ fn cmdClip(gpa: Allocator, io: std.Io, svc: *service.Service) !u8 {
     };
     try printErr(io, "clipboard transformed: {d}/{d} URLs matched a rule\n", .{ summary.matched, summary.total });
     return 0;
+}
+
+/// Run the macOS Services provider (the right-click "replace selected text"
+/// item). Normally launched on demand via the `clipmd.app` bundle, but also
+/// runnable directly (`clipmd service`) for testing.
+fn cmdService(gpa: Allocator, io: std.Io, svc: *service.Service) !u8 {
+    if (comptime is_macos) {
+        try app.runService(gpa, io, svc);
+        return 0;
+    } else {
+        try writeStderr(io, "service: the macOS Services provider is only supported on macOS\n");
+        return 1;
+    }
+}
+
+/// True when this process is the executable inside a `.app` bundle
+/// (`…/clipmd.app/Contents/MacOS/clipmd`) — how macOS launches us for a Service.
+fn launchedFromBundle(arena: Allocator) bool {
+    const path = std.fs.selfExePathAlloc(arena) catch return false;
+    return mem.indexOf(u8, path, ".app/Contents/MacOS/") != null;
 }
 
 const ClipCtx = struct { gpa: Allocator, io: std.Io, svc: *service.Service };

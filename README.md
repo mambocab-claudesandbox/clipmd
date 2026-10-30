@@ -19,9 +19,11 @@ Written in [Zig](https://ziglang.org) (0.16). The macOS platform layer is a thin
 **Swift** shim that exposes plain C functions — the menu bar and pasteboard
 (AppKit), the global hotkey (Carbon), and the macOS config-file watcher
 (libdispatch) all live there. Zig owns the transform engine, config, CLI, and
-the Linux watcher, and calls across that boundary. No third-party packages, and
-**no `.app` bundle**: the CLI hosts the menu bar itself when run as
-`clipmd daemon`.
+the Linux watcher, and calls across that boundary. No third-party packages. The
+menu-bar daemon needs **no `.app` bundle** — the CLI hosts the menu bar itself
+when run as `clipmd daemon`. An optional, minimal `clipmd.app` bundle adds a
+system **Service** that rewrites the *selected* text in place (see
+[Right-click Service](#right-click-service-replace-selection-in-place)).
 
 ---
 
@@ -39,6 +41,10 @@ the Linux watcher, and calls across that boundary. No third-party packages, and
   menu bar + hotkey, and on every platform serves a Unix socket so the CLI can
   trigger a clipboard transform (`clipmd run`) or transform a pipe through the
   daemon (`clipmd send`).
+* **Right-click Service** (macOS, optional): a system Service that transforms the
+  **selected** text in place — select a URL, pick the Service (or its shortcut),
+  and the selection becomes a rich hyperlink (or Markdown text in plain editors),
+  no clipboard round-trip. Requires the `clipmd.app` bundle; see below.
 
 ## Configuration
 
@@ -178,6 +184,10 @@ hotkey, so `clipmd daemon` is all you need. To start it at login, point a
 launchd agent at `clipmd daemon` (`~/Library/LaunchAgents/…plist` with
 `ProgramArguments` `["/usr/local/bin/clipmd", "daemon"]`).
 
+The one macOS feature that *does* need a bundle is the right-click **Service**
+(`zig build bundle` → `clipmd.app`), because a Service must be declared in an
+`Info.plist`; see [Right-click Service](#right-click-service-replace-selection-in-place).
+
 > This project is developed in a Linux sandbox without the macOS SDK or the
 > Swift toolchain, so it cannot *link* the final Mac binary here. The Zig half
 > of the macOS layer — including the `extern fn` declarations of the Swift
@@ -194,6 +204,7 @@ launchd agent at `clipmd daemon` (`~/Library/LaunchAgents/…plist` with
 clipmd [transform] [-f md|html|rtf] [-c CONFIG]   transform stdin -> stdout (default)
 clipmd daemon [-c CONFIG]                         run the menu-bar / socket daemon
 clipmd clip [-c CONFIG]                           transform the macOS clipboard in place
+clipmd service [-c CONFIG]                        run the macOS Services provider (replace selection)
 clipmd run                                        ask the daemon to transform the clipboard
 clipmd send [-f md|html|rtf]                      pipe stdin through the daemon
 clipmd hotkey                                     print the daemon's active hotkey
@@ -228,6 +239,32 @@ clipmd run           # same effect as clicking the menu item
 echo -n 'https://github.com/a/b/pull/3' | clipmd send -f html   # via the daemon
 ```
 
+### Right-click Service (replace selection in place)
+
+Unlike the clipboard/hotkey path, the Service rewrites the **selected** text
+directly — no copy, trigger, paste. Select a URL in any app, invoke the Service,
+and the selection is replaced: a real clickable hyperlink in rich editors
+(Mail, Pages, Notes), or the Markdown `[display](url)` in plain editors.
+
+This one macOS feature needs a bundle (a Service must be declared in an
+`Info.plist`), so it's opt-in:
+
+```sh
+zig build bundle                         # produces zig-out/clipmd.app
+cp -R zig-out/clipmd.app /Applications/  # register it with the system
+open /Applications/clipmd.app            # first launch registers the Service
+```
+
+The item **Transform URL to Markdown link** then appears under right-click →
+**Services** (and the app-menu Services submenu). Assign a keyboard shortcut in
+**System Settings → Keyboard → Keyboard Shortcuts → Services**. If it doesn't
+show up immediately, toggle it there, or log out and back in (the Services
+database is refreshed by `pbs`).
+
+The bundle wraps the same `clipmd` binary; it detects the bundle launch and runs
+as the Services provider (`clipmd service`), reading the same config as the rest
+of the tool. It does **not** need the daemon running.
+
 ### Config
 
 ```sh
@@ -260,11 +297,12 @@ src/
   ipc.zig             Unix-socket daemon server + client (libc sockets)
   clipboard.zig       platform clipboard abstraction
   macos/
-    clipmd_macos.swift  Swift shim: pasteboard, menu, Carbon hotkey, watcher (C ABI)
+    clipmd_macos.swift  Swift shim: pasteboard, menu, hotkey, watcher, Service (C ABI)
     ffi.zig           extern fn declarations of the Swift C-ABI surface
     pasteboard.zig    NSPasteboard read / multi-type write (marshals to Swift)
-    app.zig           trigger action + hotkey/watcher wiring, event loop
+    app.zig           trigger action, hotkey/watcher wiring, Services provider
     hotkey.zig        Combo -> Swift hotkey install/re-bind (thin wrapper)
+    Info.plist        clipmd.app bundle manifest (declares the NSServices entry)
 test/
   transform.bats     portable end-to-end CLI tests (pipes, daemon, config)
   clipboard.bats     macOS pasteboard tests (skip off macOS)

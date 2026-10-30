@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist for the optional `clipmd.app` bundle.
+
+  The bundle exists only to register a macOS System Service ("Transform URL to
+  Markdown link") that rewrites the *selected* text in place. The menu-bar
+  daemon still runs as a plain unbundled binary; this bundle wraps the same
+  `clipmd` executable, which detects a bundle launch and enters its Services
+  provider mode (see src/main.zig / src/macos/clipmd_macos.swift).
+
+  NSReturnTypes is non-empty, which is what makes the host app replace the
+  selection with what the provider writes back: RTF/HTML (a real hyperlink) for
+  rich editors, plain Markdown text everywhere else.
+
+  Assemble with `zig build bundle` (produces zig-out/clipmd.app).
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.clipmd.clipmd</string>
+    <key>CFBundleName</key>
+    <string>clipmd</string>
+    <key>CFBundleExecutable</key>
+    <string>clipmd</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.1</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.14.4</string>
+    <!-- Agent app: no Dock icon, matches setActivationPolicy(.accessory). -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>Transform URL to Markdown link</string>
+            </dict>
+            <!-- Selector: transformSelection:userData:error: -->
+            <key>NSMessage</key>
+            <string>transformSelection</string>
+            <key>NSPortName</key>
+            <string>clipmd</string>
+            <!-- Text we accept from the selection. -->
+            <key>NSSendTypes</key>
+            <array>
+                <string>public.utf8-plain-text</string>
+                <string>NSStringPboardType</string>
+            </array>
+            <!-- Non-empty => the host replaces the selection with our output. -->
+            <key>NSReturnTypes</key>
+            <array>
+                <string>public.rtf</string>
+                <string>public.html</string>
+                <string>public.utf8-plain-text</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

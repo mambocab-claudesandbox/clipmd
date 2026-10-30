@@ -297,3 +297,84 @@ func clipmd_watch_start(
     configWatcher = watcher
     return true
 }
+
+// MARK: - System Services provider (replace selection)
+
+// The Zig render callback: input bytes -> three malloc'd output buffers. Matches
+// `ffi.RenderFn`. The out params are `uint8_t**` / `size_t*`.
+private typealias ClipmdRenderFn = @convention(c) (
+    UnsafeMutableRawPointer?,                              // ctx
+    UnsafePointer<UInt8>?, Int,                            // input, input_len
+    UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>, UnsafeMutablePointer<Int>, // md, md_len
+    UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>, UnsafeMutablePointer<Int>, // html, html_len
+    UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>, UnsafeMutablePointer<Int>  // rtf, rtf_len
+) -> Bool
+
+/// Handles the "Transform URL to Markdown link" Service. Reads the selected
+/// text off the service pasteboard, renders plain/HTML/RTF via Zig, and writes
+/// all three back so the host app replaces the selection with the richest form
+/// it understands (a real hyperlink in Mail/Pages, Markdown text elsewhere).
+private final class ClipmdServiceProvider: NSObject {
+    let render: ClipmdRenderFn
+    let ctx: UnsafeMutableRawPointer?
+
+    init(render: @escaping ClipmdRenderFn, ctx: UnsafeMutableRawPointer?) {
+        self.render = render
+        self.ctx = ctx
+    }
+
+    // Selector: transformSelection:userData:error: (declared as NSMessage in
+    // Info.plist). Non-empty NSReturnTypes is what makes the host replace the
+    // selection with what we write back.
+    @objc func transformSelection(
+        _ pboard: NSPasteboard,
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString?>?
+    ) {
+        guard let input = pboard.string(forType: .string), !input.isEmpty else {
+            error?.pointee = "clipmd: no text in the selection" as NSString
+            return
+        }
+
+        var md: UnsafeMutablePointer<UInt8>? = nil
+        var mdLen = 0
+        var html: UnsafeMutablePointer<UInt8>? = nil
+        var htmlLen = 0
+        var rtf: UnsafeMutablePointer<UInt8>? = nil
+        var rtfLen = 0
+
+        let bytes = Array(input.utf8)
+        let ok = bytes.withUnsafeBufferPointer { buf in
+            render(ctx, buf.baseAddress, buf.count,
+                   &md, &mdLen, &html, &htmlLen, &rtf, &rtfLen)
+        }
+        guard ok else {
+            error?.pointee = "clipmd: transform failed" as NSString
+            return
+        }
+
+        pboard.declareTypes([typePlain, typeHTML, typeRTF], owner: nil)
+        if let md { pboard.setData(Data(bytes: md, count: mdLen), forType: typePlain); free(md) }
+        if let html { pboard.setData(Data(bytes: html, count: htmlLen), forType: typeHTML); free(html) }
+        if let rtf { pboard.setData(Data(bytes: rtf, count: rtfLen), forType: typeRTF); free(rtf) }
+    }
+}
+
+private var serviceProvider: ClipmdServiceProvider?
+
+@_cdecl("clipmd_service_run")
+func clipmd_service_run(
+    _ render: @escaping ClipmdRenderFn,
+    _ ctx: UnsafeMutableRawPointer?
+) {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    let provider = ClipmdServiceProvider(render: render, ctx: ctx)
+    serviceProvider = provider
+    NSApp.servicesProvider = provider
+    // Nudge the system to (re)scan our Info.plist service declaration.
+    NSUpdateDynamicServices()
+
+    app.run()
+}
