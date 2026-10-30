@@ -26,6 +26,24 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{ .name = "clipmd", .root_module = exe_mod });
     b.installArtifact(exe);
 
+    // `zig build bundle` assembles zig-out/clipmd.app — a minimal bundle whose
+    // only job is to register the macOS "replace selection" Service. It wraps
+    // the same clipmd binary (which enters Services-provider mode when launched
+    // from a bundle). macOS only; the menu-bar daemon stays unbundled.
+    if (target.result.os.tag == .macos) {
+        const bundle_bin = b.addInstallArtifact(exe, .{
+            .dest_dir = .{ .override = .{ .custom = "clipmd.app/Contents/MacOS" } },
+        });
+        const bundle_plist = b.addInstallFileWithDir(
+            b.path("src/macos/Info.plist"),
+            .{ .custom = "clipmd.app/Contents" },
+            "Info.plist",
+        );
+        const bundle_step = b.step("bundle", "Assemble zig-out/clipmd.app (macOS Services provider)");
+        bundle_step.dependOn(&bundle_bin.step);
+        bundle_step.dependOn(&bundle_plist.step);
+    }
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);

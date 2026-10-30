@@ -79,3 +79,30 @@ pub extern fn clipmd_hotkey_set(key_code: u32, modifiers: u32) bool;
 /// `on_change(ctx)` on the main thread for each change. Returns false if the
 /// watch could not be established.
 pub extern fn clipmd_watch_start(path: [*:0]const u8, on_change: TriggerFn, ctx: ?*anyopaque) bool;
+
+// ---------------------------------------------------------------------------
+// System Services provider (replace-selection, in the Swift layer)
+// ---------------------------------------------------------------------------
+
+/// Render callback, implemented in Zig and invoked by the Swift Services
+/// provider for each selection. Given the input text, it fills the three out
+/// pairs with freshly `malloc`-allocated buffers (the caller releases each with
+/// `clipmd_free`) and returns true; on failure it returns false and allocates
+/// nothing. Mirrors `service.Service.renderAll`.
+pub const RenderFn = *const fn (
+    ctx: ?*anyopaque,
+    input: [*]const u8,
+    input_len: usize,
+    out_md: *?[*]u8,
+    out_md_len: *usize,
+    out_html: *?[*]u8,
+    out_html_len: *usize,
+    out_rtf: *?[*]u8,
+    out_rtf_len: *usize,
+) callconv(.c) bool;
+
+/// Run as a macOS Services provider: register the `transformSelection:` handler
+/// (which calls `render(ctx, ...)` and writes the result back to the service
+/// pasteboard, replacing the selection) and run the Cocoa event loop. Does not
+/// return until the app terminates.
+pub extern fn clipmd_service_run(render: RenderFn, ctx: ?*anyopaque) void;

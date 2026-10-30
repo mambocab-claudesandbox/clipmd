@@ -56,6 +56,66 @@ inline fn ctxFrom(ptr: ?*anyopaque) *AppContext {
     return @ptrCast(@alignCast(ptr.?));
 }
 
+// ---------------------------------------------------------------------------
+// System Services provider ("replace selected text")
+// ---------------------------------------------------------------------------
+
+/// `malloc` a copy of `bytes` so the Swift layer can hand it to the host app
+/// and `free()` it afterwards. `malloc(0)` is avoided (it may return null).
+fn dupC(bytes: []const u8) ?[*]u8 {
+    const raw = std.c.malloc(@max(bytes.len, 1)) orelse return null;
+    const dest: [*]u8 = @ptrCast(raw);
+    @memcpy(dest[0..bytes.len], bytes);
+    return dest;
+}
+
+/// Render callback for the Swift Services provider. Renders the selection
+/// through the live service and hands back malloc'd md/html/rtf buffers.
+fn renderCallback(
+    user_data: ?*anyopaque,
+    input: [*]const u8,
+    input_len: usize,
+    out_md: *?[*]u8,
+    out_md_len: *usize,
+    out_html: *?[*]u8,
+    out_html_len: *usize,
+    out_rtf: *?[*]u8,
+    out_rtf_len: *usize,
+) callconv(.c) bool {
+    const ctx = ctxFrom(user_data);
+    const rendered = ctx.service.renderAll(ctx.io, ctx.gpa, input[0..input_len]) catch return false;
+    defer ctx.gpa.free(rendered.md);
+    defer ctx.gpa.free(rendered.html);
+    defer ctx.gpa.free(rendered.rtf);
+
+    const md = dupC(rendered.md) orelse return false;
+    const html = dupC(rendered.html) orelse {
+        std.c.free(@ptrCast(md));
+        return false;
+    };
+    const rtf = dupC(rendered.rtf) orelse {
+        std.c.free(@ptrCast(md));
+        std.c.free(@ptrCast(html));
+        return false;
+    };
+
+    out_md.* = md;
+    out_md_len.* = rendered.md.len;
+    out_html.* = html;
+    out_html_len.* = rendered.html.len;
+    out_rtf.* = rtf;
+    out_rtf_len.* = rendered.rtf.len;
+    return true;
+}
+
+/// Run as a macOS Services provider (the right-click "Transform URL to Markdown
+/// link" item). Blocks in the Cocoa event loop. Launched on demand by the
+/// `clipmd.app` bundle; see `src/macos/Info.plist`.
+pub fn runService(gpa: std.mem.Allocator, io: std.Io, svc: *service.Service) !void {
+    var ctx = AppContext{ .gpa = gpa, .io = io, .service = svc };
+    ffi.clipmd_service_run(renderCallback, &ctx);
+}
+
 /// Run the menu-bar app. Blocks in the Cocoa event loop until the user quits.
 pub fn run(gpa: std.mem.Allocator, io: std.Io, svc: *service.Service) !void {
     var ctx = AppContext{ .gpa = gpa, .io = io, .service = svc };
